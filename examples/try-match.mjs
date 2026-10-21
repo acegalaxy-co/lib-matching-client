@@ -11,8 +11,9 @@ if (missing.length) { console.error('missing: ' + missing.join(', ')); process.e
 
 const input = { userId: a['user-id'], game: a.game, loginName: a['login-name'] ?? a['user-id'] ?? '', bucket: a.bucket, gameToken: process.env.MM_GAME_TOKEN };
 console.log('POST', process.env.MM_BASE_URL.replace(/\/+$/, '') + '/v1/match', JSON.stringify(buildMatchBody(input)), `+ X-Game-Token <len ${input.gameToken.length}>`);
-const r = await matchNode({ baseUrl: process.env.MM_BASE_URL, timeoutMs: Number(a.timeout) || 2000 }, input);
-if (r.kind === 'ok') r.node = { ...r.node, ticket: `<len ${String(r.node.ticket ?? '').length}>` };
-console.log(JSON.stringify(r, null, 2));
-if (r.kind === 'ok') console.log(`=> connect ${r.node.ssl ? 'wss' : 'ws'}://${r.node.host}:${r.node.port} zone=${r.node.zone} bucket=${r.node.bucket} login=${input.loginName} + mmTicket`);
-process.exit(r.kind === 'ok' ? 0 : 3);
+matchNode({ baseUrl: process.env.MM_BASE_URL, timeoutMs: Number(a.timeout) || 2000 }, input, (r) => {
+  const shown = r.kind === 'ok' ? { ...r, node: { ...r.node, ticket: `<len ${String(r.node.ticket ?? '').length}>` } } : r;
+  console.log(JSON.stringify(shown, null, 2));
+  if (r.kind === 'ok') console.log(`=> connect ${r.node.ssl ? 'wss' : 'ws'}://${r.node.host}:${r.node.port} zone=${r.node.zone} bucket=${r.node.bucket} login=${input.loginName}${r.node.roomId ? ` roomId=${r.node.roomId}` : ''} + mmTicket`);
+  process.exitCode = r.kind === 'ok' ? 0 : 3;
+});

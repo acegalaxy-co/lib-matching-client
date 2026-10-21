@@ -2,14 +2,14 @@
 
 ## Giới thiệu
 
-Client TypeScript không phụ thuộc thư viện nào cho **bước 4** của luồng vào game: hỏi *matching director* xem nên kết nối tới node SFS nào **trước khi mở socket SFS**. Chạy được trong Cocos Creator 3.8 (web + Android/iOS native) và Node 18+. Việc confirm/release nằm ngoài phạm vi lib này.
+Client TypeScript không phụ thuộc thư viện nào cho **bước 4** của luồng vào game: hỏi *matching director* xem nên kết nối tới node SFS nào **trước khi mở socket SFS**. Chạy được trong Cocos Creator 3.8 (web + Android/iOS native) và Node 18+. Lib **chỉ tìm server phù hợp, không mở/không can thiệp socket SFS** — lobby tự connect từ kết quả (`obj`) nhận được trong callback. Việc confirm/release nằm ngoài phạm vi lib này.
 
 ## Cài đặt
 
 Ở thư mục gốc project Cocos Creator 3.8:
 
 ```bash
-npm install github:acegalaxy-co/lib-matching-client#v0.2.0
+npm install github:acegalaxy-co/lib-matching-client#v0.3.0
 ```
 
 ```ts
@@ -23,36 +23,45 @@ Nếu project không dùng npm: copy `src/index.ts` vào `assets/scripts/` rồi
 ## Ví dụ
 
 ```ts
-import { matchNode } from '@acegalaxy/lib-matching-client';
+import { matchNode, MatchResult } from '@acegalaxy/lib-matching-client';
 
 const cfg = { baseUrl: ENV.MM_BASE_URL }; // từ config build
 
 // Ludo
-const r = await matchNode(cfg, {
+matchNode(cfg, {
   game: 'ludo',
   gameToken,
   loginName: String(user.id),
   bucket: '2P_6',
-});
+}, onMatched);
 // Fish: { game: 'fish', gameToken, loginName: user.displayName }
 
-switch (r.kind) {
-  case 'ok':
-    // ssl -> wss
-    connectSfs({ host: r.node.host, port: r.node.port, useSSL: r.node.ssl });
-    // LoginRequest: zone = r.node.zone, param mmTicket = r.node.ticket
-    login(r.node.zone, loginName, { mmTicket: r.node.ticket });
-    break;
-  case 'fallback':
-    connectSfs(STATIC_HOST); // như hiện tại
-    break;
-  case 'blocked':
-    if (r.reason === 'PRESENCE_OTHER_GAME') showMsg('Bạn đang ở trong một ván khác');
-    else setTimeout(retry, r.retryAfterMs ?? 30000); // PRESENCE_LOCKED: chờ rồi gọi lại
-    // KHÔNG vào game
-    break;
+function onMatched(obj: MatchResult) {
+  switch (obj.kind) {
+    case 'ok':
+      // Lobby tự connect: ssl -> wss
+      connectSfs({ host: obj.node.host, port: obj.node.port, useSSL: obj.node.ssl });
+      // LoginRequest: zone = obj.node.zone, param mmTicket = obj.node.ticket
+      // Ludo: gửi kèm bucket + roomId (nếu có) -> server tự join phòng, trả 1 response room.join
+      login(obj.node.zone, loginName, {
+        mmTicket: obj.node.ticket,
+        bucket: obj.node.bucket,
+        ...(obj.node.roomId ? { roomId: obj.node.roomId } : {}),
+      });
+      break;
+    case 'fallback':
+      connectSfs(STATIC_HOST); // như hiện tại
+      break;
+    case 'blocked':
+      if (obj.reason === 'PRESENCE_OTHER_GAME') showMsg('Bạn đang ở trong một ván khác');
+      else setTimeout(retry, obj.retryAfterMs ?? 30000); // PRESENCE_LOCKED: chờ rồi gọi lại
+      // KHÔNG vào game
+      break;
+  }
 }
 ```
+
+`await matchNode(cfg, input)` vẫn dùng được (trả về đúng object đó); callback được gọi đúng 1 lần với cùng object.
 
 ## Input
 
@@ -73,6 +82,7 @@ switch (r.kind) {
 | `bucket` | Bucket được gán (`"*"` nếu game không có bucket) |
 | `ticket` | Hiệu lực 30s; truyền vào `LoginRequest` param `mmTicket` |
 | `reused` | `true` nếu trả lại đúng node cũ (reconnect) |
+| `roomId` | Tuỳ chọn (Ludo): phòng director chọn; truyền vào param `roomId` của `LoginRequest` để server tự join. Không có -> server tự xếp theo `bucket` |
 | `nodeId`, `label`, `serverBase`, `leaseNode` | Chỉ để log/debug |
 
 ## reason -> kind
@@ -88,7 +98,8 @@ switch (r.kind) {
 ## Lưu ý
 
 - `baseUrl` lấy từ config môi trường của build, không hard-code. Xác thực chỉ bằng game token (`X-Game-Token`); userId do server lấy từ token.
-- Timeout mặc định 2 giây (`timeoutMs`); hết giờ -> `fallback`/`TIMEOUT`. `matchNode` không bao giờ throw.
+- Timeout mặc định 2 giây (`timeoutMs`); hết giờ -> `fallback`/`TIMEOUT`. `matchNode` không bao giờ throw; callback ném lỗi chỉ bị log (`console.error`).
+- `cfg.transport` (tuỳ chọn) thay transport HTTP mặc định, dùng cho test hoặc stack riêng.
 - Gọi trước **mỗi** lần connect SFS, kể cả reconnect (`reused: true` trả lại đúng node cũ).
 - Bản web build gọi được (director đã bật CORS).
 - Không log token, `game_token`, `ticket`.

@@ -1,5 +1,7 @@
 // Client for the matching director (step 4): POST /v1/match.
 // Zero dependencies; works in Cocos Creator 3.8 (XMLHttpRequest) and Node 18+ (fetch).
+// The lib only picks a suitable server; it never opens or touches the SFS socket.
+// The result goes to the caller's callback and the lobby connects to the game with it.
 export const BUCKETS = ['2P_6', '2P_56', '2P_246', '3P_6', '3P_56', '3P_246', '4P_6', '4P_56', '4P_246'];
 /** Request body. gameToken is deliberately excluded (it goes in a header). */
 export function buildMatchBody(input) {
@@ -25,6 +27,10 @@ export function classify(status, json, ms = 0) {
             return { kind: 'fallback', reason: 'BAD_RESPONSE', status, ms };
         }
         const node = { ...json, port, ssl: json.ssl !== false, bucket: String((_a = json.bucket) !== null && _a !== void 0 ? _a : '*') };
+        if (json.roomId !== undefined && json.roomId !== null && json.roomId !== '')
+            node.roomId = String(json.roomId);
+        else
+            delete node.roomId;
         return { kind: 'ok', node, ms };
     }
     const reason = (json && json.reason) || `HTTP_${status}`;
@@ -83,8 +89,7 @@ function defaultTransport() {
     return typeof XMLHttpRequest !== 'undefined' ? xhrTransport : fetchTransport;
 }
 const now = () => Date.now();
-/** Ask the director for a node. Never throws. */
-export async function matchNode(cfg, input, transport) {
+async function requestMatch(cfg, input) {
     var _a;
     if (!cfg || !cfg.baseUrl) {
         return { kind: 'fallback', reason: 'NO_CONFIG', status: null, ms: 0 };
@@ -99,7 +104,7 @@ export async function matchNode(cfg, input, transport) {
         'X-Game-Token': input.gameToken,
     };
     try {
-        const send = transport || defaultTransport();
+        const send = cfg.transport || defaultTransport();
         const res = await send(url, JSON.stringify(buildMatchBody(input)), headers, (_a = cfg.timeoutMs) !== null && _a !== void 0 ? _a : 2000);
         return classify(res.status, res.body, now() - t0);
     }
@@ -107,4 +112,21 @@ export async function matchNode(cfg, input, transport) {
         const reason = e && e.message === 'TIMEOUT' ? 'TIMEOUT' : 'NETWORK';
         return { kind: 'fallback', reason, status: null, ms: now() - t0 };
     }
+}
+/**
+ * Ask the director for a node. Never throws, never touches the SFS socket.
+ * callbackFun (optional) is called exactly once with the same result object the promise resolves to
+ * (also for NO_CONFIG / NO_GAME_TOKEN / TIMEOUT / NETWORK fallbacks); errors it throws are logged, not propagated.
+ */
+export async function matchNode(cfg, input, callbackFun) {
+    const result = await requestMatch(cfg, input);
+    if (typeof callbackFun === 'function') {
+        try {
+            callbackFun(result);
+        }
+        catch (e) {
+            console.error('[lib-matching-client] callbackFun threw', e);
+        }
+    }
+    return result;
 }

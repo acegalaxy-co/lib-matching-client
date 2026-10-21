@@ -83,7 +83,7 @@ test('missing gameToken -> NO_GAME_TOKEN without network', async () => {
   let hit = 0;
   const t = async () => { hit++; return { status: 200, body: OK }; };
   for (const gameToken of [undefined, '']) {
-    const r = await matchNode({ baseUrl: 'http://x.example.com' }, { ...input, gameToken }, t);
+    const r = await matchNode({ baseUrl: 'http://x.example.com', transport: t }, { ...input, gameToken });
     assert.deepEqual(r, { kind: 'fallback', reason: 'NO_GAME_TOKEN', status: null, ms: 0 });
   }
   assert.equal(hit, 0);
@@ -92,7 +92,7 @@ test('missing gameToken -> NO_GAME_TOKEN without network', async () => {
 test('userId omitted from body when not given', async () => {
   let sent;
   const t = async (u, body) => { sent = JSON.parse(body); return { status: 200, body: OK }; };
-  await matchNode({ baseUrl: 'http://x.example.com' }, { game: 'fish', gameToken: 'g', loginName: 'Bob' }, t);
+  await matchNode({ baseUrl: 'http://x.example.com', transport: t }, { game: 'fish', gameToken: 'g', loginName: 'Bob' });
   assert.deepEqual(sent, { game: 'fish', loginName: 'Bob' });
   assert.deepEqual(buildMatchBody({ userId: 7, game: 'fish', gameToken: 'g', loginName: 'Bob' }), { userId: '7', game: 'fish', loginName: 'Bob' });
 });
@@ -101,4 +101,40 @@ test('503 AUTH_UNAVAILABLE reason preserved', () => {
   const r = classify(503, { ok: false, reason: 'AUTH_UNAVAILABLE' }, 5);
   assert.deepEqual(r, { kind: 'fallback', reason: 'AUTH_UNAVAILABLE', status: 503, ms: 5 });
   assert.equal(classify(503, { reason: '' }).reason, 'HTTP_503');
+});
+
+test('callback: called once with same object as the promise; roomId passed through', async () => {
+  const t = async () => ({ status: 200, body: { ...OK, roomId: 'R-77' } });
+  const calls = [];
+  const r = await matchNode({ baseUrl: 'http://x.example.com', transport: t }, input, (o) => calls.push(o));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0], r);
+  assert.equal(r.kind, 'ok'); assert.equal(r.node.roomId, 'R-77');
+});
+
+test('callback fires for NO_GAME_TOKEN and NETWORK fallbacks', async () => {
+  const got = [];
+  const r1 = await matchNode({ baseUrl: 'http://x.example.com' }, { ...input, gameToken: '' }, (o) => got.push(o));
+  const bad = async () => { throw new Error('NETWORK'); };
+  const r2 = await matchNode({ baseUrl: 'http://x.example.com', transport: bad }, input, (o) => got.push(o));
+  assert.equal(got.length, 2);
+  assert.equal(got[0], r1); assert.equal(got[0].reason, 'NO_GAME_TOKEN');
+  assert.equal(got[1], r2); assert.equal(got[1].reason, 'NETWORK');
+});
+
+test('callback that throws does not break matchNode', async () => {
+  const t = async () => ({ status: 200, body: OK });
+  const orig = console.error; let logged = 0;
+  console.error = () => { logged++; };
+  try {
+    const r = await matchNode({ baseUrl: 'http://x.example.com', transport: t }, input, () => { throw new Error('boom'); });
+    assert.equal(r.kind, 'ok'); assert.equal(logged, 1);
+  } finally { console.error = orig; }
+});
+
+test('classify: roomId null/missing -> no key; numeric -> string', () => {
+  assert.equal('roomId' in classify(200, { ...OK, roomId: null }).node, false);
+  assert.equal('roomId' in classify(200, { ...OK }).node, false);
+  assert.equal('roomId' in classify(200, { ...OK, roomId: '' }).node, false);
+  assert.equal(classify(200, { ...OK, roomId: 12 }).node.roomId, '12');
 });
