@@ -3,13 +3,13 @@
 
 export interface MatchConfig {
   baseUrl: string;
-  clientToken: string;
   /** Request timeout in ms (default 2000). */
   timeoutMs?: number;
 }
 
 export interface MatchInput {
-  userId: string | number;
+  /** Optional: the director takes the userId from the game token. */
+  userId?: string | number;
   game: string;
   gameToken: string;
   loginName: string;
@@ -47,18 +47,20 @@ export const BUCKETS = ['2P_6', '2P_56', '2P_246', '3P_6', '3P_56', '3P_246', '4
 
 /** Request body. gameToken is deliberately excluded (it goes in a header). */
 export function buildMatchBody(input: MatchInput): Record<string, string> {
-  const body: Record<string, string> = {
-    userId: String(input.userId),
-    game: input.game,
-    loginName: input.loginName,
-  };
+  const body: Record<string, string> = {};
+  if (input.userId !== undefined && input.userId !== null && input.userId !== '') body.userId = String(input.userId);
+  body.game = input.game;
+  body.loginName = input.loginName;
   if (input.bucket) body.bucket = input.bucket;
   return body;
 }
 
 /** Map an HTTP status + parsed JSON to ok / fallback / blocked. */
 export function classify(status: number, json: any, ms = 0): MatchResult {
-  if (status >= 500) return { kind: 'fallback', reason: `HTTP_${status}`, status, ms };
+  if (status >= 500) {
+    const r = json && typeof json.reason === 'string' && json.reason ? json.reason : `HTTP_${status}`;
+    return { kind: 'fallback', reason: r, status, ms };
+  }
   if (json && json.ok === true) {
     const port = Number(json.port);
     if (!json.host || !isFinite(port) || port <= 0) {
@@ -116,16 +118,18 @@ const now = () => Date.now();
 
 /** Ask the director for a node. Never throws. */
 export async function matchNode(cfg: MatchConfig, input: MatchInput, transport?: MatchTransport): Promise<MatchResult> {
-  if (!cfg || !cfg.baseUrl || !cfg.clientToken) {
+  if (!cfg || !cfg.baseUrl) {
     return { kind: 'fallback', reason: 'NO_CONFIG', status: null, ms: 0 };
+  }
+  if (!input || !input.gameToken) {
+    return { kind: 'fallback', reason: 'NO_GAME_TOKEN', status: null, ms: 0 };
   }
   const t0 = now();
   const url = `${cfg.baseUrl.replace(/\/+$/, '')}/v1/match`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${cfg.clientToken}`,
+    'X-Game-Token': input.gameToken,
   };
-  if (input.gameToken) headers['X-Game-Token'] = input.gameToken;
   try {
     const send = transport || defaultTransport();
     const res = await send(url, JSON.stringify(buildMatchBody(input)), headers, cfg.timeoutMs ?? 2000);

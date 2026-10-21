@@ -13,14 +13,14 @@ function server(handler) {
   });
 }
 
-test('ok: sends body + Bearer + X-Game-Token, returns node', async () => {
+test('ok: sends body + X-Game-Token only (no Authorization), returns node', async () => {
   let seen;
   const { s, url } = await server((req, b, res) => { seen = { path: req.url, auth: req.headers.authorization, gt: req.headers['x-game-token'], body: JSON.parse(b) }; res.end(JSON.stringify(OK)); });
   try {
-    const r = await matchNode({ baseUrl: url + '/', clientToken: 'ct' }, input);
+    const r = await matchNode({ baseUrl: url + '/' }, input);
     assert.equal(r.kind, 'ok');
     assert.equal(r.node.host, 'game.example.com'); assert.equal(r.node.zone, 'ludo'); assert.equal(r.node.port, 443);
-    assert.deepEqual(seen, { path: '/v1/match', auth: 'Bearer ct', gt: 'gt-123', body: { userId: '14246', game: 'ludo', loginName: '14246', bucket: '2P_6' } });
+    assert.deepEqual(seen, { path: '/v1/match', auth: undefined, gt: 'gt-123', body: { userId: '14246', game: 'ludo', loginName: '14246', bucket: '2P_6' } });
   } finally { s.close(); }
 });
 
@@ -34,20 +34,21 @@ test('classify: presence -> blocked, business errors -> fallback', () => {
   for (const reason of ['NO_NODE', 'UNKNOWN_GAME', 'UNKNOWN_BUCKET']) assert.equal(classify(200, { ok: false, reason }).kind, 'fallback');
   assert.equal(classify(401, { ok: false, reason: 'UNAUTHORIZED' }).reason, 'UNAUTHORIZED');
   assert.equal(classify(503, null).reason, 'HTTP_503');
+  assert.equal(classify(403, { ok: false, reason: 'USER_MISMATCH' }).kind, 'fallback');
   assert.equal(classify(200, { ok: true, host: '', port: 0 }).reason, 'BAD_RESPONSE');
 });
 
 test('timeout -> fallback TIMEOUT, never throws', async () => {
   const { s, url } = await server(() => { /* never answers */ });
   try {
-    const r = await matchNode({ baseUrl: url, clientToken: 'ct', timeoutMs: 100 }, input);
+    const r = await matchNode({ baseUrl: url, timeoutMs: 100 }, input);
     assert.equal(r.kind, 'fallback'); assert.equal(r.reason, 'TIMEOUT');
   } finally { s.closeAllConnections(); s.close(); }
 });
 
 test('network error / missing config -> fallback', async () => {
-  assert.equal((await matchNode({ baseUrl: 'http://127.0.0.1:1', clientToken: 'ct' }, input)).reason, 'NETWORK');
-  assert.equal((await matchNode({ baseUrl: '', clientToken: '' }, input)).reason, 'NO_CONFIG');
+  assert.equal((await matchNode({ baseUrl: 'http://127.0.0.1:1' }, input)).reason, 'NETWORK');
+  assert.equal((await matchNode({ baseUrl: '' }, input)).reason, 'NO_CONFIG');
 });
 
 test('XMLHttpRequest transport is used when present (Cocos)', async () => {
@@ -58,9 +59,46 @@ test('XMLHttpRequest transport is used when present (Cocos)', async () => {
   };
   try {
     const { matchNode: m } = await import('../dist/index.js?xhr');
-    const r = await m({ baseUrl: 'https://mm.example.com', clientToken: 'ct' }, input);
+    const r = await m({ baseUrl: 'https://mm.example.com' }, input);
     assert.equal(r.kind, 'ok');
     assert.deepEqual(calls[0], ['POST', 'https://mm.example.com/v1/match']);
     assert.ok(calls.some(([k, v]) => k === 'X-Game-Token' && v === 'gt-123'));
   } finally { delete globalThis.XMLHttpRequest; }
+});
+
+test('xhr: no Authorization header is set', async () => {
+  const hdrs = [];
+  globalThis.XMLHttpRequest = class {
+    open() {} setRequestHeader(k) { hdrs.push(k); }
+    send() { this.status = 200; this.responseText = JSON.stringify(OK); setTimeout(() => this.onload(), 0); }
+  };
+  try {
+    const { matchNode: m } = await import('../dist/index.js?xhr2');
+    await m({ baseUrl: 'https://mm.example.com' }, input);
+    assert.ok(hdrs.includes('X-Game-Token')); assert.ok(!hdrs.some((h) => h.toLowerCase() === 'authorization'));
+  } finally { delete globalThis.XMLHttpRequest; }
+});
+
+test('missing gameToken -> NO_GAME_TOKEN without network', async () => {
+  let hit = 0;
+  const t = async () => { hit++; return { status: 200, body: OK }; };
+  for (const gameToken of [undefined, '']) {
+    const r = await matchNode({ baseUrl: 'http://x.example.com' }, { ...input, gameToken }, t);
+    assert.deepEqual(r, { kind: 'fallback', reason: 'NO_GAME_TOKEN', status: null, ms: 0 });
+  }
+  assert.equal(hit, 0);
+});
+
+test('userId omitted from body when not given', async () => {
+  let sent;
+  const t = async (u, body) => { sent = JSON.parse(body); return { status: 200, body: OK }; };
+  await matchNode({ baseUrl: 'http://x.example.com' }, { game: 'fish', gameToken: 'g', loginName: 'Bob' }, t);
+  assert.deepEqual(sent, { game: 'fish', loginName: 'Bob' });
+  assert.deepEqual(buildMatchBody({ userId: 7, game: 'fish', gameToken: 'g', loginName: 'Bob' }), { userId: '7', game: 'fish', loginName: 'Bob' });
+});
+
+test('503 AUTH_UNAVAILABLE reason preserved', () => {
+  const r = classify(503, { ok: false, reason: 'AUTH_UNAVAILABLE' }, 5);
+  assert.deepEqual(r, { kind: 'fallback', reason: 'AUTH_UNAVAILABLE', status: 503, ms: 5 });
+  assert.equal(classify(503, { reason: '' }).reason, 'HTTP_503');
 });

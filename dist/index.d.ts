@@ -1,11 +1,11 @@
 export interface MatchConfig {
     baseUrl: string;
-    clientToken: string;
     /** Request timeout in ms (default 2000). */
     timeoutMs?: number;
 }
 export interface MatchInput {
-    userId: string | number;
+    /** Optional: the director takes the userId from the game token. */
+    userId?: string | number;
     game: string;
     gameToken: string;
     loginName: string;
