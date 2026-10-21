@@ -1,45 +1,78 @@
-// Client for the matching director (step 4): POST /v1/match.
+// Client for the matching director (step 4): POST /v1/match, /v1/confirm, /v1/release.
 // Zero dependencies; works in Cocos Creator 3.8 (XMLHttpRequest) and Node 18+ (fetch).
 // The lib only picks a suitable server; it never opens or touches the SFS socket.
 // The result goes to the caller's callback and the lobby connects to the game with it.
-export const BUCKETS = ['2P_6', '2P_56', '2P_246', '3P_6', '3P_56', '3P_246', '4P_6', '4P_56', '4P_246'];
+/** Ludo buckets only (kept for compatibility). Other games have their own buckets; the lib does not list them. */
+export const LUDO_BUCKETS = ['2P_6', '2P_56', '2P_246', '3P_6', '3P_56', '3P_246', '4P_6', '4P_56', '4P_246'];
+/** @deprecated alias of LUDO_BUCKETS (Ludo only). */
+export const BUCKETS = LUDO_BUCKETS;
+const BUCKET_RE = /^[A-Za-z0-9_:.-]{1,32}$/;
+/** Syntax check only (no per-game list). */
+export function isValidBucket(b) {
+    return typeof b === 'string' && BUCKET_RE.test(b);
+}
+const hasId = (v) => v !== undefined && v !== null && v !== '';
 /** Request body. gameToken is deliberately excluded (it goes in a header). */
 export function buildMatchBody(input) {
     const body = {};
-    if (input.userId !== undefined && input.userId !== null && input.userId !== '')
+    if (hasId(input.userId))
         body.userId = String(input.userId);
     body.game = input.game;
     body.loginName = input.loginName;
-    if (input.bucket)
-        body.bucket = input.bucket;
+    if (isValidBucket(input.bucket))
+        body.bucket = input.bucket; // malformed bucket is dropped, not sent
+    return body;
+}
+export function buildConfirmBody(input) {
+    const body = {};
+    if (hasId(input.userId))
+        body.userId = String(input.userId);
+    body.game = input.game;
+    body.roomId = String(input.roomId);
+    return body;
+}
+export function buildReleaseBody(input) {
+    const body = {};
+    if (hasId(input.userId))
+        body.userId = String(input.userId);
+    body.game = input.game;
     return body;
 }
 /** Map an HTTP status + parsed JSON to ok / fallback / blocked. */
 export function classify(status, json, ms = 0) {
     var _a;
+    const raw = json !== null && json !== void 0 ? json : null;
     if (status >= 500) {
         const r = json && typeof json.reason === 'string' && json.reason ? json.reason : `HTTP_${status}`;
-        return { kind: 'fallback', reason: r, status, ms };
+        return { kind: 'fallback', reason: r, status, ms, raw };
     }
     if (json && json.ok === true) {
         const port = Number(json.port);
         if (!json.host || !isFinite(port) || port <= 0) {
-            return { kind: 'fallback', reason: 'BAD_RESPONSE', status, ms };
+            return { kind: 'fallback', reason: 'BAD_RESPONSE', status, ms, raw };
         }
         const node = { ...json, port, ssl: json.ssl !== false, bucket: String((_a = json.bucket) !== null && _a !== void 0 ? _a : '*') };
         if (json.roomId !== undefined && json.roomId !== null && json.roomId !== '')
             node.roomId = String(json.roomId);
         else
             delete node.roomId;
-        return { kind: 'ok', node, ms };
+        return { kind: 'ok', node, ms, status, raw };
     }
     const reason = (json && json.reason) || `HTTP_${status}`;
-    if (reason === 'PRESENCE_OTHER_GAME')
-        return { kind: 'blocked', reason, retryAfterMs: null, ms };
-    if (reason === 'PRESENCE_LOCKED') {
-        return { kind: 'blocked', reason, retryAfterMs: Number(json.retryAfterMs) || 30000, ms };
+    if (reason === 'PRESENCE_OTHER_GAME' || reason === 'PRESENCE_LOCKED') {
+        const b = {
+            kind: 'blocked',
+            reason,
+            retryAfterMs: reason === 'PRESENCE_LOCKED' ? Number(json.retryAfterMs) || 30000 : null,
+            ms,
+            status,
+            raw,
+        };
+        if (json && typeof json.heldGame === 'string' && json.heldGame)
+            b.heldGame = json.heldGame;
+        return b;
     }
-    return { kind: 'fallback', reason, status, ms };
+    return { kind: 'fallback', reason, status, ms, raw };
 }
 function xhrTransport(url, body, headers, timeoutMs) {
     return new Promise((resolve, reject) => {
@@ -129,4 +162,61 @@ export async function matchNode(cfg, input, callbackFun) {
         }
     }
     return result;
+}
+/** Classify a confirm/release HTTP answer. */
+export function classifyAction(status, json, ms = 0) {
+    const raw = json !== null && json !== void 0 ? json : null;
+    if (status < 400 && !(json && json.ok === false))
+        return { kind: 'ok', status, ms, raw };
+    const reason = json && typeof json.reason === 'string' && json.reason ? json.reason : `HTTP_${status}`;
+    return { kind: 'fail', status, reason, ms, raw };
+}
+async function requestAction(cfg, path, gameToken, body, precheck) {
+    var _a;
+    if (!cfg || !cfg.baseUrl)
+        return { kind: 'fail', status: null, reason: 'NO_CONFIG', ms: 0 };
+    if (!gameToken)
+        return { kind: 'fail', status: null, reason: 'NO_GAME_TOKEN', ms: 0 };
+    const bad = precheck ? precheck() : null;
+    if (bad)
+        return { kind: 'fail', status: null, reason: bad, ms: 0 };
+    const t0 = now();
+    const url = `${cfg.baseUrl.replace(/\/+$/, '')}${path}`;
+    const headers = { 'Content-Type': 'application/json', 'X-Game-Token': gameToken };
+    try {
+        const send = cfg.transport || defaultTransport();
+        const res = await send(url, JSON.stringify(body()), headers, (_a = cfg.timeoutMs) !== null && _a !== void 0 ? _a : 2000);
+        return classifyAction(res.status, res.body, now() - t0);
+    }
+    catch (e) {
+        const reason = e && e.message === 'TIMEOUT' ? 'TIMEOUT' : 'NETWORK';
+        return { kind: 'fail', status: null, reason, ms: now() - t0 };
+    }
+}
+function finish(result, cb) {
+    if (typeof cb === 'function') {
+        try {
+            cb(result);
+        }
+        catch (e) {
+            console.error('[lib-matching-client] callbackFun threw', e);
+        }
+    }
+    return result;
+}
+/**
+ * Tell the director the player is really in `roomId` (POST /v1/confirm). Call after SFS login + join.
+ * Never throws; callbackFun is called exactly once with the same object the promise resolves to.
+ */
+export async function confirmRoom(cfg, input, callbackFun) {
+    const r = await requestAction(cfg, '/v1/confirm', input && input.gameToken, () => buildConfirmBody(input), () => (!input.game ? 'BAD_REQUEST' : !hasId(input.roomId) ? 'NO_ROOM_ID' : null));
+    return finish(r, callbackFun);
+}
+/**
+ * Release the player's presence lease (POST /v1/release). Call when the player leaves the table / game ends.
+ * Never throws; callbackFun is called exactly once with the same object the promise resolves to.
+ */
+export async function releaseNode(cfg, input, callbackFun) {
+    const r = await requestAction(cfg, '/v1/release', input && input.gameToken, () => buildReleaseBody(input), () => (!input.game ? 'BAD_REQUEST' : null));
+    return finish(r, callbackFun);
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { matchNode, classify, buildMatchBody } from '../dist/index.js';
+import { matchNode, confirmRoom, releaseNode, classify, classifyAction, buildMatchBody, BUCKETS, LUDO_BUCKETS } from '../dist/index.js';
 
 const OK = { ok: true, nodeId: 2000, serverBase: 2000, label: 'Gse-Engine', host: 'game.example.com', port: 443, ssl: true, zone: 'ludo', bucket: '2P_6', ticket: 't', reused: false, leaseNode: true };
 const input = { userId: 14246, game: 'ludo', gameToken: 'gt-123', loginName: '14246', bucket: '2P_6' };
@@ -29,7 +29,8 @@ test('no bucket for non-Ludo games', () => {
 });
 
 test('classify: presence -> blocked, business errors -> fallback', () => {
-  assert.deepEqual(classify(200, { ok: false, reason: 'PRESENCE_OTHER_GAME' }), { kind: 'blocked', reason: 'PRESENCE_OTHER_GAME', retryAfterMs: null, ms: 0 });
+  const ob = classify(200, { ok: false, reason: 'PRESENCE_OTHER_GAME' });
+  assert.equal(ob.kind, 'blocked'); assert.equal(ob.reason, 'PRESENCE_OTHER_GAME'); assert.equal(ob.retryAfterMs, null); assert.equal(ob.ms, 0);
   assert.equal(classify(200, { ok: false, reason: 'PRESENCE_LOCKED', retryAfterMs: 5000 }).retryAfterMs, 5000);
   for (const reason of ['NO_NODE', 'UNKNOWN_GAME', 'UNKNOWN_BUCKET']) assert.equal(classify(200, { ok: false, reason }).kind, 'fallback');
   assert.equal(classify(401, { ok: false, reason: 'UNAUTHORIZED' }).reason, 'UNAUTHORIZED');
@@ -99,7 +100,7 @@ test('userId omitted from body when not given', async () => {
 
 test('503 AUTH_UNAVAILABLE reason preserved', () => {
   const r = classify(503, { ok: false, reason: 'AUTH_UNAVAILABLE' }, 5);
-  assert.deepEqual(r, { kind: 'fallback', reason: 'AUTH_UNAVAILABLE', status: 503, ms: 5 });
+  assert.deepEqual(r, { kind: 'fallback', reason: 'AUTH_UNAVAILABLE', status: 503, ms: 5, raw: { ok: false, reason: 'AUTH_UNAVAILABLE' } });
   assert.equal(classify(503, { reason: '' }).reason, 'HTTP_503');
 });
 
@@ -137,4 +138,91 @@ test('classify: roomId null/missing -> no key; numeric -> string', () => {
   assert.equal('roomId' in classify(200, { ...OK }).node, false);
   assert.equal('roomId' in classify(200, { ...OK, roomId: '' }).node, false);
   assert.equal(classify(200, { ...OK, roomId: 12 }).node.roomId, '12');
+});
+
+// ---- v0.4.0 ----
+const fake = (status, body, calls = []) => (url, b, headers, t) => { calls.push({ url, body: JSON.parse(b), headers, t }); return Promise.resolve({ status, body }); };
+
+test('bucket: any game bucket is sent, malformed bucket dropped', () => {
+  const base = { userId: '1', gameToken: 'x', loginName: 'u' };
+  assert.equal(buildMatchBody({ ...base, game: 'dominoqq', bucket: '3' }).bucket, '3');
+  assert.equal(buildMatchBody({ ...base, game: 'chess', bucket: 'rapid10:r' }).bucket, 'rapid10:r');
+  assert.equal(buildMatchBody({ ...base, game: 'ludo', bucket: '2P_6' }).bucket, '2P_6');
+  for (const bad of ['', 'a b', 'x'.repeat(33), 'a/b', '<x>', 5]) assert.equal('bucket' in buildMatchBody({ ...base, game: 'g', bucket: bad }), false, String(bad));
+  assert.equal(BUCKETS, LUDO_BUCKETS); assert.equal(BUCKETS.length, 9);
+});
+
+test('match keeps status/raw; presence keeps reason/retryAfterMs/heldGame; UNKNOWN_GAME fallback keeps reason', async () => {
+  const ok = await matchNode({ baseUrl: 'http://x', transport: fake(200, OK) }, input);
+  assert.equal(ok.kind, 'ok'); assert.equal(ok.status, 200); assert.equal(ok.raw.nodeId, 2000);
+  assert.equal(ok.node.nodeId, 2000); assert.equal(ok.node.label, 'Gse-Engine'); assert.equal(ok.node.reused, false); assert.equal(ok.node.leaseNode, true);
+  const locked = await matchNode({ baseUrl: 'http://x', transport: fake(200, { ok: false, reason: 'PRESENCE_LOCKED', retryAfterMs: 7000, heldGame: 'holdem' }) }, input);
+  assert.equal(locked.kind, 'blocked'); assert.equal(locked.reason, 'PRESENCE_LOCKED'); assert.equal(locked.retryAfterMs, 7000); assert.equal(locked.heldGame, 'holdem'); assert.equal(locked.status, 200);
+  const other = await matchNode({ baseUrl: 'http://x', transport: fake(200, { ok: false, reason: 'PRESENCE_OTHER_GAME' }) }, input);
+  assert.equal(other.kind, 'blocked'); assert.equal(other.retryAfterMs, null); assert.equal('heldGame' in other, false);
+  const unk = await matchNode({ baseUrl: 'http://x', transport: fake(200, { ok: false, reason: 'UNKNOWN_GAME' }) }, input);
+  assert.equal(unk.kind, 'fallback'); assert.equal(unk.reason, 'UNKNOWN_GAME'); assert.equal(unk.status, 200);
+  const auth = await matchNode({ baseUrl: 'http://x', transport: fake(503, { ok: false, reason: 'AUTH_UNAVAILABLE' }) }, input);
+  assert.equal(auth.reason, 'AUTH_UNAVAILABLE'); assert.equal(auth.status, 503); assert.equal(auth.raw.reason, 'AUTH_UNAVAILABLE');
+});
+
+test('confirmRoom happy: POST /v1/confirm, X-Game-Token header, token not in body, callback once', async () => {
+  const calls = []; const cbs = [];
+  const r = await confirmRoom({ baseUrl: 'https://mm.example.com/', timeoutMs: 500, transport: fake(200, { ok: true }, calls) },
+    { userId: 14246, game: 'ludo', roomId: 99, gameToken: 'gt-123' }, (o) => cbs.push(o));
+  assert.equal(r.kind, 'ok'); assert.equal(r.status, 200); assert.equal(r.reason, undefined);
+  assert.equal(calls.length, 1); assert.equal(calls[0].url, 'https://mm.example.com/v1/confirm');
+  assert.deepEqual(calls[0].body, { userId: '14246', game: 'ludo', roomId: '99' });
+  assert.equal(calls[0].headers['X-Game-Token'], 'gt-123'); assert.equal(calls[0].headers.Authorization, undefined); assert.equal(calls[0].t, 500);
+  assert.equal(cbs.length, 1); assert.equal(cbs[0], r);
+});
+
+test('releaseNode happy: POST /v1/release without userId', async () => {
+  const calls = []; const cbs = [];
+  const r = await releaseNode({ baseUrl: 'https://mm.example.com', transport: fake(200, { ok: true }, calls) }, { game: 'gaple', gameToken: 'gt' }, (o) => cbs.push(o));
+  assert.equal(r.kind, 'ok'); assert.equal(calls[0].url, 'https://mm.example.com/v1/release');
+  assert.deepEqual(calls[0].body, { game: 'gaple' }); assert.equal(cbs.length, 1); assert.equal(cbs[0], r);
+});
+
+test('confirm/release: missing gameToken / config / roomId -> fail without calling transport', async () => {
+  let n = 0; const transport = () => { n++; return Promise.resolve({ status: 200, body: { ok: true } }); };
+  const cbs = [];
+  const a = await confirmRoom({ baseUrl: 'http://x', transport }, { game: 'ludo', roomId: '1', gameToken: '' }, (o) => cbs.push(o));
+  const b = await releaseNode({ baseUrl: 'http://x', transport }, { game: 'ludo', gameToken: undefined });
+  const c = await confirmRoom({ baseUrl: 'http://x', transport }, { game: 'ludo', roomId: '', gameToken: 't' });
+  const d = await releaseNode({ baseUrl: '', transport }, { game: 'ludo', gameToken: 't' });
+  assert.deepEqual([a.kind, a.reason, a.status], ['fail', 'NO_GAME_TOKEN', null]);
+  assert.equal(b.reason, 'NO_GAME_TOKEN'); assert.equal(c.reason, 'NO_ROOM_ID'); assert.equal(d.reason, 'NO_CONFIG');
+  assert.equal(n, 0); assert.equal(cbs.length, 1);
+});
+
+test('confirm/release: HTTP errors keep status + reason', async () => {
+  const run = (status, body) => confirmRoom({ baseUrl: 'http://x', transport: fake(status, body) }, { game: 'ludo', roomId: '1', gameToken: 't' });
+  let r = await run(200, { ok: false, reason: 'NO_RESERVATION' });
+  assert.deepEqual([r.kind, r.reason, r.status], ['fail', 'NO_RESERVATION', 200]);
+  r = await run(401, { ok: false, reason: 'UNAUTHORIZED' }); assert.deepEqual([r.kind, r.reason, r.status], ['fail', 'UNAUTHORIZED', 401]);
+  r = await run(403, { ok: false, reason: 'USER_MISMATCH' }); assert.equal(r.reason, 'USER_MISMATCH');
+  r = await run(503, { ok: false, reason: 'AUTH_UNAVAILABLE' }); assert.equal(r.reason, 'AUTH_UNAVAILABLE');
+  r = await run(404, null); assert.deepEqual([r.kind, r.reason], ['fail', 'HTTP_404']);
+  r = await run(500, 'x'); assert.equal(r.reason, 'HTTP_500');
+  assert.equal(classifyAction(200, null).kind, 'ok');
+});
+
+test('confirm/release: timeout and network errors -> fail with reason, never throw', async () => {
+  const { s, url } = await server(() => { /* never answers */ });
+  try {
+    const r = await releaseNode({ baseUrl: url, timeoutMs: 100 }, { game: 'ludo', gameToken: 't' });
+    assert.deepEqual([r.kind, r.reason, r.status], ['fail', 'TIMEOUT', null]);
+  } finally { s.closeAllConnections(); s.close(); }
+  assert.equal((await confirmRoom({ baseUrl: 'http://127.0.0.1:1' }, { game: 'ludo', roomId: '1', gameToken: 't' })).reason, 'NETWORK');
+  const thrower = () => Promise.reject(new Error('boom'));
+  assert.equal((await confirmRoom({ baseUrl: 'http://x', transport: thrower }, { game: 'g', roomId: '1', gameToken: 't' })).reason, 'NETWORK');
+});
+
+test('callback that throws does not break confirm/release', async () => {
+  const orig = console.error; console.error = () => {};
+  try {
+    const r = await releaseNode({ baseUrl: 'http://x', transport: fake(200, { ok: true }) }, { game: 'g', gameToken: 't' }, () => { throw new Error('cb'); });
+    assert.equal(r.kind, 'ok');
+  } finally { console.error = orig; }
 });

@@ -2,14 +2,14 @@
 
 ## Giới thiệu
 
-Client TypeScript không phụ thuộc thư viện nào cho **bước 4** của luồng vào game: hỏi *matching director* xem nên kết nối tới node SFS nào **trước khi mở socket SFS**. Chạy được trong Cocos Creator 3.8 (web + Android/iOS native) và Node 18+. Lib **chỉ tìm server phù hợp, không mở/không can thiệp socket SFS** — lobby tự connect từ kết quả (`obj`) nhận được trong callback. Việc confirm/release nằm ngoài phạm vi lib này.
+Client TypeScript không phụ thuộc thư viện nào cho **bước 4** của luồng vào game: hỏi *matching director* xem nên kết nối tới node SFS nào **trước khi mở socket SFS**. Chạy được trong Cocos Creator 3.8 (web + Android/iOS native) và Node 18+. Lib **chỉ tìm server phù hợp, không mở/không can thiệp socket SFS** — lobby tự connect từ kết quả (`obj`) nhận được trong callback. Lib cũng gọi `confirm` / `release` của director (báo presence), nhưng **không bao giờ connect/login SFS, không chọn ws/tcp** — caller tự làm.
 
 ## Cài đặt
 
 Ở thư mục gốc project Cocos Creator 3.8:
 
 ```bash
-npm install github:acegalaxy-co/lib-matching-client#v0.3.0
+npm install github:acegalaxy-co/lib-matching-client#v0.4.0
 ```
 
 ```ts
@@ -63,6 +63,66 @@ function onMatched(obj: MatchResult) {
 
 `await matchNode(cfg, input)` vẫn dùng được (trả về đúng object đó); callback được gọi đúng 1 lần với cùng object.
 
+## Luồng đầy đủ (bot Node và client Cocos dùng chung)
+
+1. `matchNode(cfg, {game, gameToken, loginName, bucket?})` -> `ok` + `node`.
+2. Caller tự connect + login SFS (host/port/ssl/zone/ticket từ `node`, kèm `bucket`/`roomId`).
+3. Vào bàn thật -> `confirmRoom(cfg, {game, roomId, gameToken})` với roomId thật.
+4. Chơi xong / rời bàn -> `releaseNode(cfg, {game, gameToken})`.
+Lần chơi sau gọi lại `matchNode`.
+
+```ts
+import { matchNode, confirmRoom, releaseNode } from '@acegalaxy/lib-matching-client';
+
+const r = await matchNode(cfg, { game: 'dominoqq', gameToken, loginName: name, bucket: '3' });
+if (r.kind === 'ok') {
+  await myConnectAndLoginSfs(r.node);              // việc của caller, không phải của lib
+  await confirmRoom(cfg, { game: 'dominoqq', roomId, gameToken });
+  /* ...chơi... */
+  await releaseNode(cfg, { game: 'dominoqq', gameToken });
+}
+```
+
+Bot Node (`.mjs`, Node 18+, dùng fetch mặc định):
+
+```js
+import { matchNode, confirmRoom, releaseNode } from '@acegalaxy/lib-matching-client';
+const cfg = { baseUrl: process.env.MM_BASE_URL, timeoutMs: 2000 };
+const m = await matchNode(cfg, { game, gameToken, loginName, bucket });
+// log: m.node.nodeId, label, reused, leaseNode, ticket (độ dài), roomId, bucket, m.ms
+```
+
+### Kết quả `matchNode` -> hành vi bot gợi ý
+
+| Kết quả lib | Bot (matchmaker cũ) | Hành vi gợi ý |
+|---|---|---|
+| `kind:'ok'` | `ok` | Connect `node.host:port` (ssl, zone, ticket), log `nodeId/label/reused/leaseNode/bucket/roomId/ms` |
+| `kind:'blocked'` (`PRESENCE_LOCKED` / `PRESENCE_OTHER_GAME`) | `skip` | Chờ rồi thử lại: `retryMs = clamp(retryAfterMs ?? 30000, 1000, 120000)`; log `reason`, `heldGame` |
+| `kind:'fallback'`, `reason:'UNKNOWN_GAME'` | `unserved` | Director không phục vụ game: bot chạy kiểu thường, nhớ một thời gian |
+| `kind:'fallback'`, `reason` ∈ `UNAUTHORIZED` / `USER_MISMATCH` (`status` 401/403) | `fail` ("auth") | Fail closed, cảnh báo 1 lần |
+| `kind:'fallback'`, khác (`NO_NODE`, `AUTH_UNAVAILABLE`, `HTTP_5xx`, `BAD_RESPONSE`, `TIMEOUT`, `NETWORK`, `NO_GAME_TOKEN`, `NO_CONFIG`...) | `fail` | Fail closed + backoff; `reason`/`status`/`raw` để log |
+
+(Client Cocos thì `fallback` = dùng host tĩnh, xem bảng reason dưới.) Mọi kết quả có `ms`; `raw` là body director (không chứa token).
+
+### `confirmRoom` / `releaseNode`
+
+```ts
+confirmRoom(cfg: MatchConfig, input: { userId?: string|number; game: string; roomId: string|number; gameToken: string }, cb?: (r: ActionResult) => void): Promise<ActionResult>
+releaseNode(cfg: MatchConfig, input: { userId?: string|number; game: string; gameToken: string }, cb?: (r: ActionResult) => void): Promise<ActionResult>
+// ActionResult = { kind: 'ok' | 'fail'; status: number | null; reason?: string; ms: number; raw?: any }
+```
+
+| Tình huống | kind | status | reason |
+|---|---|---|---|
+| HTTP < 400 và body `ok !== false` | `ok` | HTTP status | - |
+| 200 `{ok:false,reason:'NO_RESERVATION'}` (confirm khi chưa có lease) | `fail` | 200 | `NO_RESERVATION` |
+| 401 / 403 / 503 | `fail` | 401 / 403 / 503 | `UNAUTHORIZED` / `USER_MISMATCH` / `AUTH_UNAVAILABLE` |
+| HTTP lỗi khác, không có reason | `fail` | status | `HTTP_<status>` |
+| Thiếu `gameToken` / `roomId` (confirm) / `baseUrl` | `fail` | null | `NO_GAME_TOKEN` / `NO_ROOM_ID` / `NO_CONFIG` (không gọi mạng) |
+| Timeout / lỗi mạng | `fail` | null | `TIMEOUT` / `NETWORK` |
+
+Cả hai không throw, callback (nếu có) gọi đúng 1 lần với cùng object promise trả về. Best effort: caller thường chỉ log lỗi.
+
 ## Input
 
 | Field | Ý nghĩa |
@@ -71,7 +131,7 @@ function onMatched(obj: MatchResult) {
 | `gameToken` | `game_token` từ `GET /api/internal-game/game-token`; gửi ở header `X-Game-Token`, không nằm trong body. Đây là cách xác thực DUY NHẤT (không có client token / header `Authorization`) |
 | `game` | `ludo`, `billiard`, `holdem`, `rummy`, `chess`, `dominoqq`, `dominobet`, `dominowild`, `gaple`, `fish` (là `fish`, không phải `fishshooting`) |
 | `loginName` | Đúng username dùng trong SFS `LoginRequest`: `ludo`/`billiard`/`holdem`/`rummy` = userId; `chess`/`dominoqq`/`dominobet`/`dominowild`/`gaple`/`fish` = display name |
-| `bucket` | **Chỉ Ludo**: loại bàn = số người × luật ra chuồng (vd `2P_6` = 2 người, ra chuồng khi đổ 6), KHÔNG phải mức cược. Giá trị: `BUCKETS`. Game khác bỏ qua, nhận lại `"*"` |
+| `bucket` | Loại bàn, mọi game có thể có bucket riêng (Ludo `2P_6`, dominoqq `"1".."18"`, gaple `"1".."6"`, chess `rapid10:r`...). Lib KHÔNG kiểm theo danh sách game (director quyết, sai -> `UNKNOWN_BUCKET`); chỉ kiểm cú pháp 1-32 ký tự `[A-Za-z0-9_:.-]`, sai cú pháp thì **không gửi** bucket (không lỗi). `LUDO_BUCKETS` (alias `BUCKETS`) chỉ là danh sách của Ludo. Game không dùng bucket nhận lại `"*"` |
 
 ## Response (`r.node`)
 
@@ -84,6 +144,8 @@ function onMatched(obj: MatchResult) {
 | `reused` | `true` nếu trả lại đúng node cũ (reconnect) |
 | `roomId` | Tuỳ chọn (Ludo): phòng director chọn; truyền vào param `roomId` của `LoginRequest` để server tự join. Không có -> server tự xếp theo `bucket` |
 | `nodeId`, `label`, `serverBase`, `leaseNode` | Chỉ để log/debug |
+
+Ngoài `node`, kết quả `ok` còn có `ms`, `status`, `raw`; `blocked` có `reason`, `retryAfterMs`, `heldGame?`, `status`, `raw`.
 
 ## reason -> kind
 

@@ -11,9 +11,38 @@ export interface MatchInput {
     game: string;
     gameToken: string;
     loginName: string;
-    /** Ludo only. */
+    /**
+     * Table type for games whose director policy uses buckets (Ludo "2P_6", dominoqq "1".."18", gaple "1".."6",
+     * chess "rapid10:r", ...). The lib does not check it against any game list, only its syntax
+     * (1-32 chars of [A-Za-z0-9_:.-]); a malformed bucket is NOT sent. Games without buckets ignore it.
+     */
     bucket?: string;
 }
+export interface ConfirmInput {
+    /** Optional: the director takes the userId from the game token. */
+    userId?: string | number;
+    game: string;
+    /** The real room the player joined (after SFS login + join). */
+    roomId: string | number;
+    gameToken: string;
+}
+export interface ReleaseInput {
+    userId?: string | number;
+    game: string;
+    gameToken: string;
+}
+/** Result of confirmRoom / releaseNode. ok = HTTP < 400 and body.ok !== false. Never thrown. */
+export interface ActionResult {
+    kind: 'ok' | 'fail';
+    /** HTTP status, null when no response (NO_CONFIG, NO_GAME_TOKEN, NO_ROOM_ID, TIMEOUT, NETWORK). */
+    status: number | null;
+    /** Set on fail: director reason (NO_RESERVATION, USER_MISMATCH, UNAUTHORIZED, AUTH_UNAVAILABLE, ...), HTTP_<status>, or a local reason. */
+    reason?: string;
+    ms: number;
+    /** Parsed JSON body of the director response (null when none / not JSON). */
+    raw?: any;
+}
+export type ActionCallback = (obj: ActionResult) => void;
 export interface MatchNode {
     host: string;
     port: number;
@@ -29,20 +58,31 @@ export interface MatchNode {
     /** Room to join right after login when the director knows one (Ludo); absent = the lobby picks. */
     roomId?: string;
 }
+/**
+ * v0.4.0 added (additive) `status` on ok/blocked, `heldGame` on blocked, `raw` on all.
+ * `status` is the HTTP status, null when no response was received.
+ * `raw` is the parsed director body (null when none); never contains the game token.
+ */
 export type MatchResult = {
     kind: 'ok';
     node: MatchNode;
     ms: number;
+    status?: number | null;
+    raw?: any;
 } | {
     kind: 'fallback';
     reason: string;
     status: number | null;
     ms: number;
+    raw?: any;
 } | {
     kind: 'blocked';
     reason: string;
     retryAfterMs: number | null;
     ms: number;
+    status?: number | null;
+    heldGame?: string;
+    raw?: any;
 };
 /** Receives the full result once; the lobby uses it to connect on ok, or to decide on fallback/blocked. */
 export type MatchCallback = (obj: MatchResult) => void;
@@ -50,9 +90,16 @@ export type MatchTransport = (url: string, body: string, headers: Record<string,
     status: number;
     body: any;
 }>;
+/** Ludo buckets only (kept for compatibility). Other games have their own buckets; the lib does not list them. */
+export declare const LUDO_BUCKETS: readonly ["2P_6", "2P_56", "2P_246", "3P_6", "3P_56", "3P_246", "4P_6", "4P_56", "4P_246"];
+/** @deprecated alias of LUDO_BUCKETS (Ludo only). */
 export declare const BUCKETS: readonly ["2P_6", "2P_56", "2P_246", "3P_6", "3P_56", "3P_246", "4P_6", "4P_56", "4P_246"];
+/** Syntax check only (no per-game list). */
+export declare function isValidBucket(b: unknown): b is string;
 /** Request body. gameToken is deliberately excluded (it goes in a header). */
 export declare function buildMatchBody(input: MatchInput): Record<string, string>;
+export declare function buildConfirmBody(input: ConfirmInput): Record<string, string>;
+export declare function buildReleaseBody(input: ReleaseInput): Record<string, string>;
 /** Map an HTTP status + parsed JSON to ok / fallback / blocked. */
 export declare function classify(status: number, json: any, ms?: number): MatchResult;
 /**
@@ -61,3 +108,15 @@ export declare function classify(status: number, json: any, ms?: number): MatchR
  * (also for NO_CONFIG / NO_GAME_TOKEN / TIMEOUT / NETWORK fallbacks); errors it throws are logged, not propagated.
  */
 export declare function matchNode(cfg: MatchConfig, input: MatchInput, callbackFun?: MatchCallback): Promise<MatchResult>;
+/** Classify a confirm/release HTTP answer. */
+export declare function classifyAction(status: number, json: any, ms?: number): ActionResult;
+/**
+ * Tell the director the player is really in `roomId` (POST /v1/confirm). Call after SFS login + join.
+ * Never throws; callbackFun is called exactly once with the same object the promise resolves to.
+ */
+export declare function confirmRoom(cfg: MatchConfig, input: ConfirmInput, callbackFun?: ActionCallback): Promise<ActionResult>;
+/**
+ * Release the player's presence lease (POST /v1/release). Call when the player leaves the table / game ends.
+ * Never throws; callbackFun is called exactly once with the same object the promise resolves to.
+ */
+export declare function releaseNode(cfg: MatchConfig, input: ReleaseInput, callbackFun?: ActionCallback): Promise<ActionResult>;

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- Mới: `confirmRoom(cfg, {userId?, game, roomId, gameToken}, cb?)` (POST /v1/confirm) và `releaseNode(cfg, {userId?, game, gameToken}, cb?)` (POST /v1/release). Không throw; callback đúng 1 lần với cùng object promise trả về; kết quả `ActionResult {kind:'ok'|'fail', status, reason?, ms, raw?}`. Thiếu `gameToken` -> `fail`/`NO_GAME_TOKEN`, thiếu `roomId` -> `NO_ROOM_ID`, thiếu `baseUrl` -> `NO_CONFIG` (đều không gọi mạng); timeout/lỗi mạng -> `TIMEOUT`/`NETWORK`.
+- Bucket dùng cho mọi game (dominoqq "1".."18", gaple "1".."6", chess "rapid10:r"...). Lib không kiểm theo danh sách game, chỉ kiểm cú pháp `[A-Za-z0-9_:.-]{1,32}`; bucket sai cú pháp KHÔNG được gửi. Thêm `isValidBucket`, `LUDO_BUCKETS`; `BUCKETS` giữ làm alias (chỉ Ludo).
+- `MatchResult` thêm field (không đổi nghĩa field cũ): `raw` (body director) trên mọi kind, `status` trên ok/blocked, `heldGame` trên blocked.
+- `blocked` / `PRESENCE_OTHER_GAME|PRESENCE_LOCKED` vẫn như cũ (`retryAfterMs` null / mặc định 30000).
+- Thêm `classifyAction`, `buildConfirmBody`, `buildReleaseBody`.
+
 ## 0.3.0
 
 - BREAKING: `matchNode(cfg, input, callbackFun?)` — tham số thứ 3 giờ là callback; `transport` chuyển vào `cfg.transport`.
