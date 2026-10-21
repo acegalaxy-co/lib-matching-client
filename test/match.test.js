@@ -226,3 +226,66 @@ test('callback that throws does not break confirm/release', async () => {
     assert.equal(r.kind, 'ok');
   } finally { console.error = orig; }
 });
+
+// ---- v0.5.0: listRooms + roomId/nodeId ----
+import { listRooms, MatchingClient } from '../dist/index.js';
+
+test('listRooms ok: GET /v1/public/rooms?game=&bucket=, no auth headers', async () => {
+  let seen;
+  const { s, url } = await server((req, b, res) => { seen = { method: req.method, path: req.url, auth: req.headers.authorization, gt: req.headers['x-game-token'] }; res.end(JSON.stringify({ ok: true, ts: 1, game: 'ludo', cmd: 'room.list', data: { rooms: [1] } })); });
+  try {
+    const r = await new MatchingClient({ baseUrl: 'http://unused', roomApiUrl: url + '/' }).listRooms({ game: 'ludo', bucket: '2P_6' });
+    assert.deepEqual(r, { ok: true, cmd: 'room.list', data: { rooms: [1] } });
+    assert.deepEqual(seen, { method: 'GET', path: '/v1/public/rooms?game=ludo&bucket=2P_6', auth: undefined, gt: undefined });
+    await listRooms({ baseUrl: 'x', roomApiUrl: url }, { game: 'ludo', bucket: 'bad bucket!' });
+    assert.equal(seen.path, '/v1/public/rooms?game=ludo');
+  } finally { s.close(); }
+});
+
+test('listRooms: 429 -> RATE_LIMITED, 400 UNKNOWN_GAME, 500 -> HTTP_500, bad body on 200', async () => {
+  const cfg = (status, body) => ({ baseUrl: 'x', roomApiUrl: 'http://r', transport: () => Promise.resolve({ status, body }) });
+  assert.deepEqual(await listRooms(cfg(429, { ok: false }), { game: 'g' }), { ok: false, reason: 'RATE_LIMITED' });
+  assert.deepEqual(await listRooms(cfg(400, { ok: false, reason: 'UNKNOWN_GAME' }), { game: 'g' }), { ok: false, reason: 'UNKNOWN_GAME' });
+  assert.deepEqual(await listRooms(cfg(500, null), { game: 'g' }), { ok: false, reason: 'HTTP_500' });
+  assert.deepEqual(await listRooms(cfg(200, null), { game: 'g' }), { ok: false, reason: 'HTTP_200' });
+});
+
+test('listRooms: timeout, network, not configured; never throws', async () => {
+  const { s, url } = await server(() => { /* never answers */ });
+  try {
+    assert.deepEqual(await listRooms({ baseUrl: 'x', roomApiUrl: url, timeoutMs: 100 }, { game: 'ludo' }), { ok: false, reason: 'TIMEOUT' });
+  } finally { s.closeAllConnections(); s.close(); }
+  assert.equal((await listRooms({ baseUrl: 'x', roomApiUrl: 'http://127.0.0.1:1' }, { game: 'ludo' })).reason, 'NETWORK');
+  assert.deepEqual(await listRooms({ baseUrl: 'x' }, { game: 'ludo' }), { ok: false, reason: 'NOT_CONFIGURED' });
+  assert.deepEqual(await listRooms(undefined, { game: 'ludo' }), { ok: false, reason: 'NOT_CONFIGURED' });
+});
+
+test('matchNode: roomId/nodeId in body only when provided', async () => {
+  const bodies = [];
+  const transport = async (u, b) => { bodies.push(JSON.parse(b)); return { status: 200, body: OK }; };
+  await matchNode({ baseUrl: 'http://x', transport }, input);
+  await matchNode({ baseUrl: 'http://x', transport }, { ...input, roomId: 77, nodeId: '2000' });
+  assert.equal('roomId' in bodies[0] || 'nodeId' in bodies[0], false);
+  assert.equal(bodies[1].roomId, '77'); assert.equal(bodies[1].nodeId, '2000');
+});
+
+test('matchNode: 409 ROOM_UNAVAILABLE and 400 ROOM_NODE_REQUIRED -> fallback with reason', async () => {
+  for (const [status, reason] of [[409, 'ROOM_UNAVAILABLE'], [400, 'ROOM_NODE_REQUIRED']]) {
+    const r = await matchNode({ baseUrl: 'http://x', transport: fake(status, { ok: false, reason }) }, { ...input, roomId: '1' });
+    assert.deepEqual([r.kind, r.reason, r.status], ['fallback', reason, status]);
+  }
+});
+
+test('listRooms: balance forwarded as query param, omitted when undefined', async () => {
+  const urls = [];
+  const transport = async (u) => { urls.push(u); return { status: 200, body: { ok: true, cmd: 'c', data: {} } }; };
+  const cfg = { baseUrl: 'x', roomApiUrl: 'http://r', transport };
+  await listRooms(cfg, { game: 'gaple', bucket: '1', balance: 12500 });
+  await listRooms(cfg, { game: 'gaple', balance: '0' });
+  await listRooms(cfg, { game: 'gaple' });
+  assert.deepEqual(urls, [
+    'http://r/v1/public/rooms?game=gaple&bucket=1&balance=12500',
+    'http://r/v1/public/rooms?game=gaple&balance=0',
+    'http://r/v1/public/rooms?game=gaple',
+  ]);
+});

@@ -1,5 +1,7 @@
 export interface MatchConfig {
     baseUrl: string;
+    /** v0.5.0: base URL of the public room API (GET /v1/public/rooms). Absent = listRooms returns NOT_CONFIGURED. */
+    roomApiUrl?: string;
     /** Request timeout in ms (default 2000). */
     timeoutMs?: number;
     /** Override the HTTP transport (tests / custom stacks). Default: XHR when present, else fetch. */
@@ -17,6 +19,10 @@ export interface MatchInput {
      * (1-32 chars of [A-Za-z0-9_:.-]); a malformed bucket is NOT sent. Games without buckets ignore it.
      */
     bucket?: string;
+    /** v0.5.0: join this specific room (requires nodeId, else the director answers 400 ROOM_NODE_REQUIRED). Sent only when provided. */
+    roomId?: string | number;
+    /** v0.5.0: node that owns roomId. Sent only when provided. */
+    nodeId?: string | number;
 }
 export interface ConfirmInput {
     /** Optional: the director takes the userId from the game token. */
@@ -86,10 +92,27 @@ export type MatchResult = {
 };
 /** Receives the full result once; the lobby uses it to connect on ok, or to decide on fallback/blocked. */
 export type MatchCallback = (obj: MatchResult) => void;
-export type MatchTransport = (url: string, body: string, headers: Record<string, string>, timeoutMs: number) => Promise<{
+export type MatchTransport = (url: string, body: string, headers: Record<string, string>, timeoutMs: number, 
+/** v0.5.0: HTTP method, 'POST' (default) or 'GET' (listRooms; body is ''). */
+method?: 'GET' | 'POST') => Promise<{
     status: number;
     body: any;
 }>;
+export interface ListRoomsInput {
+    game: string;
+    bucket?: string;
+    /** v0.5.0: forwarded as `balance` query param (String(), omitted when undefined/null) for games whose list depends on the player's balance. */
+    balance?: string | number;
+}
+/** Result of listRooms. data is the room API payload as-is (same shape the game's SFS list reply carries). */
+export type ListRoomsResult = {
+    ok: true;
+    cmd: string;
+    data: any;
+} | {
+    ok: false;
+    reason: 'NOT_CONFIGURED' | 'NETWORK' | 'TIMEOUT' | 'RATE_LIMITED' | 'UNKNOWN_GAME' | string;
+};
 /** Ludo buckets only (kept for compatibility). Other games have their own buckets; the lib does not list them. */
 export declare const LUDO_BUCKETS: readonly ["2P_6", "2P_56", "2P_246", "3P_6", "3P_56", "3P_246", "4P_6", "4P_56", "4P_246"];
 /** @deprecated alias of LUDO_BUCKETS (Ludo only). */
@@ -120,3 +143,19 @@ export declare function confirmRoom(cfg: MatchConfig, input: ConfirmInput, callb
  * Never throws; callbackFun is called exactly once with the same object the promise resolves to.
  */
 export declare function releaseNode(cfg: MatchConfig, input: ReleaseInput, callbackFun?: ActionCallback): Promise<ActionResult>;
+/**
+ * v0.5.0: list rooms from the public room API: GET ${roomApiUrl}/v1/public/rooms?game=&bucket=.
+ * No auth headers. Never throws. ok:true -> {cmd, data} (data = the SFS-shaped list payload);
+ * otherwise {ok:false, reason}: NOT_CONFIGURED (no roomApiUrl), NETWORK, TIMEOUT, RATE_LIMITED (429),
+ * UNKNOWN_GAME, or HTTP_<status>. A malformed bucket is dropped, not sent.
+ */
+export declare function listRooms(cfg: MatchConfig, input: ListRoomsInput): Promise<ListRoomsResult>;
+/** Object wrapper over the functions above: `new MatchingClient({baseUrl, roomApiUrl?, timeoutMs?, transport?})`. */
+export declare class MatchingClient {
+    readonly config: MatchConfig;
+    constructor(config: MatchConfig);
+    matchNode(input: MatchInput, cb?: MatchCallback): Promise<MatchResult>;
+    confirmRoom(input: ConfirmInput, cb?: ActionCallback): Promise<ActionResult>;
+    releaseNode(input: ReleaseInput, cb?: ActionCallback): Promise<ActionResult>;
+    listRooms(input: ListRoomsInput): Promise<ListRoomsResult>;
+}

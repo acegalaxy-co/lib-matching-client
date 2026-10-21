@@ -1,6 +1,6 @@
 {
   "name": "@acegalaxy/lib-matching-client",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Client for the matching director (mm-director) step 4: POST /v1/match, /v1/confirm, /v1/release with X-Game-Token; match result ok / fallback / blocked. Zero dependencies, works in Cocos (web + native via XMLHttpRequest) and Node (fetch).",
   "type": "module",

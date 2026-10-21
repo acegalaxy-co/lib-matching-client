@@ -21,6 +21,10 @@ export function buildMatchBody(input) {
     body.loginName = input.loginName;
     if (isValidBucket(input.bucket))
         body.bucket = input.bucket; // malformed bucket is dropped, not sent
+    if (hasId(input.roomId))
+        body.roomId = String(input.roomId);
+    if (hasId(input.nodeId))
+        body.nodeId = String(input.nodeId);
     return body;
 }
 export function buildConfirmBody(input) {
@@ -74,10 +78,10 @@ export function classify(status, json, ms = 0) {
     }
     return { kind: 'fallback', reason, status, ms, raw };
 }
-function xhrTransport(url, body, headers, timeoutMs) {
+function xhrTransport(url, body, headers, timeoutMs, method = 'POST') {
     return new Promise((resolve, reject) => {
         const x = new XMLHttpRequest();
-        x.open('POST', url, true);
+        x.open(method, url, true);
         x.timeout = timeoutMs;
         for (const k of Object.keys(headers))
             x.setRequestHeader(k, headers[k]);
@@ -93,14 +97,17 @@ function xhrTransport(url, body, headers, timeoutMs) {
         };
         x.onerror = () => reject(new Error('NETWORK'));
         x.ontimeout = () => reject(new Error('TIMEOUT'));
-        x.send(body);
+        if (method === 'GET')
+            x.send();
+        else
+            x.send(body);
     });
 }
-async function fetchTransport(url, body, headers, timeoutMs) {
+async function fetchTransport(url, body, headers, timeoutMs, method = 'POST') {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-        const res = await fetch(url, { method: 'POST', headers, body, signal: ctrl.signal });
+        const res = await fetch(url, method === 'GET' ? { method, headers, signal: ctrl.signal } : { method, headers, body, signal: ctrl.signal });
         let parsed = null;
         try {
             parsed = await res.json();
@@ -219,4 +226,47 @@ export async function confirmRoom(cfg, input, callbackFun) {
 export async function releaseNode(cfg, input, callbackFun) {
     const r = await requestAction(cfg, '/v1/release', input && input.gameToken, () => buildReleaseBody(input), () => (!input.game ? 'BAD_REQUEST' : null));
     return finish(r, callbackFun);
+}
+/**
+ * v0.5.0: list rooms from the public room API: GET ${roomApiUrl}/v1/public/rooms?game=&bucket=.
+ * No auth headers. Never throws. ok:true -> {cmd, data} (data = the SFS-shaped list payload);
+ * otherwise {ok:false, reason}: NOT_CONFIGURED (no roomApiUrl), NETWORK, TIMEOUT, RATE_LIMITED (429),
+ * UNKNOWN_GAME, or HTTP_<status>. A malformed bucket is dropped, not sent.
+ */
+export async function listRooms(cfg, input) {
+    var _a, _b;
+    if (!cfg || !cfg.roomApiUrl)
+        return { ok: false, reason: 'NOT_CONFIGURED' };
+    if (!input || typeof input.game !== 'string' || !input.game)
+        return { ok: false, reason: 'UNKNOWN_GAME' };
+    let url = `${cfg.roomApiUrl.replace(/\/+$/, '')}/v1/public/rooms?game=${encodeURIComponent(input.game)}`;
+    if (isValidBucket(input.bucket))
+        url += `&bucket=${encodeURIComponent(input.bucket)}`;
+    if (input.balance !== undefined && input.balance !== null)
+        url += `&balance=${encodeURIComponent(String(input.balance))}`;
+    try {
+        const send = cfg.transport || defaultTransport();
+        const res = await send(url, '', { Accept: 'application/json' }, (_a = cfg.timeoutMs) !== null && _a !== void 0 ? _a : 2000, 'GET');
+        const j = res.body;
+        if (res.status === 429)
+            return { ok: false, reason: 'RATE_LIMITED' };
+        if (res.status < 400 && j && j.ok === true)
+            return { ok: true, cmd: String((_b = j.cmd) !== null && _b !== void 0 ? _b : ''), data: j.data };
+        if (j && j.reason === 'UNKNOWN_GAME')
+            return { ok: false, reason: 'UNKNOWN_GAME' };
+        return { ok: false, reason: `HTTP_${res.status}` };
+    }
+    catch (e) {
+        return { ok: false, reason: e && e.message === 'TIMEOUT' ? 'TIMEOUT' : 'NETWORK' };
+    }
+}
+/** Object wrapper over the functions above: `new MatchingClient({baseUrl, roomApiUrl?, timeoutMs?, transport?})`. */
+export class MatchingClient {
+    constructor(config) {
+        this.config = config;
+    }
+    matchNode(input, cb) { return matchNode(this.config, input, cb); }
+    confirmRoom(input, cb) { return confirmRoom(this.config, input, cb); }
+    releaseNode(input, cb) { return releaseNode(this.config, input, cb); }
+    listRooms(input) { return listRooms(this.config, input); }
 }

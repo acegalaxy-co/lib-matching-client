@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Mới (additive, tương thích ngược): `listRooms(cfg, {game, bucket?, balance?})` -> `{ok:true, cmd, data}` | `{ok:false, reason}` (GET `${roomApiUrl}/v1/public/rooms?game=&bucket=`, không header auth). reason: `NOT_CONFIGURED` (thiếu `roomApiUrl`), `NETWORK`, `TIMEOUT`, `RATE_LIMITED` (429), `UNKNOWN_GAME`, `HTTP_<status>`. Không throw.
+- `MatchConfig.roomApiUrl?`; class `MatchingClient` bọc các hàm (`new MatchingClient({baseUrl, roomApiUrl?})`).
+- `matchNode` nhận `roomId?`, `nodeId?` (chỉ gửi trong body /v1/match khi có). 409 `ROOM_UNAVAILABLE` và 400 `ROOM_NODE_REQUIRED` trả `fallback` với `reason` tương ứng như các reason director khác.
+- `MatchTransport` thêm tham số thứ 5 tuỳ chọn `method` ('GET' | 'POST'); transport tự viết cần xử lý 'GET' cho `listRooms`.
+
 ## 0.4.0
 
 - Mới: `confirmRoom(cfg, {userId?, game, roomId, gameToken}, cb?)` (POST /v1/confirm) và `releaseNode(cfg, {userId?, game, gameToken}, cb?)` (POST /v1/release). Không throw; callback đúng 1 lần với cùng object promise trả về; kết quả `ActionResult {kind:'ok'|'fail', status, reason?, ms, raw?}`. Thiếu `gameToken` -> `fail`/`NO_GAME_TOKEN`, thiếu `roomId` -> `NO_ROOM_ID`, thiếu `baseUrl` -> `NO_CONFIG` (đều không gọi mạng); timeout/lỗi mạng -> `TIMEOUT`/`NETWORK`.

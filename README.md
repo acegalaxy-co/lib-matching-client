@@ -123,6 +123,19 @@ releaseNode(cfg: MatchConfig, input: { userId?: string|number; game: string; gam
 
 Cả hai không throw, callback (nếu có) gọi đúng 1 lần với cùng object promise trả về. Best effort: caller thường chỉ log lỗi.
 
+### `listRooms` (v0.5.0)
+
+```ts
+const c = new MatchingClient({ baseUrl: 'https://director.example', roomApiUrl: 'https://rooms.example' });
+const r = await c.listRooms({ game: 'ludo', bucket: '2P_6', balance? }); // or listRooms(cfg, {...})
+// { ok: true, cmd, data } | { ok: false, reason }
+// reason: NOT_CONFIGURED | NETWORK | TIMEOUT | RATE_LIMITED (429) | UNKNOWN_GAME | HTTP_<status>
+```
+
+`GET ${roomApiUrl}/v1/public/rooms?game=&bucket=`, không header auth, cùng `timeoutMs`/`transport` như `matchNode` (transport nhận `method` 'GET' làm tham số thứ 5). `data` là payload y hệt reply SFS của cmd danh sách phòng. Không throw.
+
+`matchNode` nhận thêm `roomId?` + `nodeId?` (chỉ gửi khi có; có `roomId` thì phải có `nodeId`). Director trả `409 ROOM_UNAVAILABLE` (phòng không còn vào được) hoặc `400 ROOM_NODE_REQUIRED` -> `kind:'fallback'` với `reason` tương ứng và `status`; caller coi `ROOM_UNAVAILABLE` là "chọn lại phòng".
+
 ## Input
 
 | Field | Ý nghĩa |
