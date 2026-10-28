@@ -5,7 +5,7 @@
 
 export interface MatchConfig {
   baseUrl: string;
-  /** v0.5.0: base URL of the public room API (GET /v1/public/rooms). Absent = listRooms returns NOT_CONFIGURED. */
+  /** @deprecated v0.6.0: use baseUrl (listRooms now calls the director with X-Game-Token). Honoured for one more version only when baseUrl is absent: old public GET /v1/public/rooms, no auth. */
   roomApiUrl?: string;
   /** Request timeout in ms (default 2000). */
   timeoutMs?: number;
@@ -96,10 +96,12 @@ export type MatchTransport = (
   timeoutMs: number,
   /** v0.5.0: HTTP method, 'POST' (default) or 'GET' (listRooms; body is ''). */
   method?: 'GET' | 'POST'
-) => Promise<{ status: number; body: any }>;
+) => Promise<{ status: number; body: any; /** v0.6.0: optional response headers (lower-case keys), used for Retry-After. */ headers?: Record<string, string> }>;
 
 export interface ListRoomsInput {
   game: string;
+  /** v0.6.0 (required): player's game token, sent as X-Game-Token. Missing -> {ok:false, reason:'NO_GAME_TOKEN'}. Not needed in legacy roomApiUrl-only mode. */
+  gameToken?: string;
   bucket?: string;
   /** v0.5.0: forwarded as `balance` query param (String(), omitted when undefined/null) for games whose list depends on the player's balance. */
   balance?: string | number;
@@ -108,7 +110,7 @@ export interface ListRoomsInput {
 /** Result of listRooms. data is the room API payload as-is (same shape the game's SFS list reply carries). */
 export type ListRoomsResult =
   | { ok: true; cmd: string; data: any }
-  | { ok: false; reason: 'NOT_CONFIGURED' | 'NETWORK' | 'TIMEOUT' | 'RATE_LIMITED' | 'UNKNOWN_GAME' | string };
+  | { ok: false; reason: 'NOT_CONFIGURED' | 'NO_GAME_TOKEN' | 'UNAUTHORIZED' | 'NETWORK' | 'TIMEOUT' | 'RATE_LIMITED' | 'UNKNOWN_GAME' | string; status?: number | null; retryAfterMs?: number | null };
 
 /** Ludo buckets only (kept for compatibility). Other games have their own buckets; the lib does not list them. */
 export const LUDO_BUCKETS = ['2P_6', '2P_56', '2P_246', '3P_6', '3P_56', '3P_246', '4P_6', '4P_56', '4P_246'] as const;
@@ -184,7 +186,7 @@ export function classify(status: number, json: any, ms = 0): MatchResult {
 }
 
 function xhrTransport(url: string, body: string, headers: Record<string, string>, timeoutMs: number, method: 'GET' | 'POST' = 'POST') {
-  return new Promise<{ status: number; body: any }>((resolve, reject) => {
+  return new Promise<{ status: number; body: any; headers?: Record<string, string> }>((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open(method, url, true);
     x.timeout = timeoutMs;
@@ -192,7 +194,7 @@ function xhrTransport(url: string, body: string, headers: Record<string, string>
     x.onload = () => {
       let parsed: any = null;
       try { parsed = JSON.parse(x.responseText); } catch (_) { parsed = null; }
-      resolve({ status: x.status, body: parsed });
+      resolve({ status: x.status, body: parsed, headers: { 'retry-after': (typeof x.getResponseHeader === 'function' && x.getResponseHeader('Retry-After')) || '' } });
     };
     x.onerror = () => reject(new Error('NETWORK'));
     x.ontimeout = () => reject(new Error('TIMEOUT'));
@@ -207,7 +209,7 @@ async function fetchTransport(url: string, body: string, headers: Record<string,
     const res = await fetch(url, method === 'GET' ? { method, headers, signal: ctrl.signal } : { method, headers, body, signal: ctrl.signal });
     let parsed: any = null;
     try { parsed = await res.json(); } catch (_) { parsed = null; }
-    return { status: res.status, body: parsed };
+    return { status: res.status, body: parsed, headers: { 'retry-after': res.headers.get('retry-after') || '' } };
   } catch (e: any) {
     throw new Error(e && e.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK');
   } finally {
@@ -322,31 +324,42 @@ export async function releaseNode(cfg: MatchConfig, input: ReleaseInput, callbac
 }
 
 /**
- * v0.5.0: list rooms from the public room API: GET ${roomApiUrl}/v1/public/rooms?game=&bucket=.
- * No auth headers. Never throws. ok:true -> {cmd, data} (data = the SFS-shaped list payload);
- * otherwise {ok:false, reason}: NOT_CONFIGURED (no roomApiUrl), NETWORK, TIMEOUT, RATE_LIMITED (429),
- * UNKNOWN_GAME, or HTTP_<status>. A malformed bucket is dropped, not sent.
+ * v0.6.0: list rooms via the director: GET ${baseUrl}/v1/rooms?game=&bucket=&balance= with X-Game-Token. Never throws.
+ * ok:true -> {cmd, data}. Otherwise {ok:false, reason, status?, retryAfterMs?}: NO_GAME_TOKEN (nothing sent),
+ * UNAUTHORIZED (401/403), RATE_LIMITED (429, retryAfterMs from Retry-After), UNKNOWN_GAME, NETWORK, TIMEOUT, HTTP_<status>.
+ * A malformed bucket is dropped, not sent.
+ * Deprecated: with only cfg.roomApiUrl (no baseUrl) the old public GET /v1/public/rooms (no auth) is used; baseUrl wins if both set.
  */
 export async function listRooms(cfg: MatchConfig, input: ListRoomsInput): Promise<ListRoomsResult> {
-  if (!cfg || !cfg.roomApiUrl) return { ok: false, reason: 'NOT_CONFIGURED' };
+  const legacy = !!cfg && !cfg.baseUrl && !!cfg.roomApiUrl;
+  if (!cfg || (!cfg.baseUrl && !cfg.roomApiUrl)) return { ok: false, reason: 'NOT_CONFIGURED' };
+  if (!legacy && !(input && input.gameToken)) return { ok: false, reason: 'NO_GAME_TOKEN', status: null };
   if (!input || typeof input.game !== 'string' || !input.game) return { ok: false, reason: 'UNKNOWN_GAME' };
-  let url = `${cfg.roomApiUrl.replace(/\/+$/, '')}/v1/public/rooms?game=${encodeURIComponent(input.game)}`;
+  const base = (legacy ? cfg.roomApiUrl! : cfg.baseUrl).replace(/\/+$/, '');
+  let url = `${base}${legacy ? '/v1/public/rooms' : '/v1/rooms'}?game=${encodeURIComponent(input.game)}`;
   if (isValidBucket(input.bucket)) url += `&bucket=${encodeURIComponent(input.bucket)}`;
   if (input.balance !== undefined && input.balance !== null) url += `&balance=${encodeURIComponent(String(input.balance))}`;
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (!legacy) headers['X-Game-Token'] = input.gameToken as string;
   try {
     const send = cfg.transport || defaultTransport();
-    const res = await send(url, '', { Accept: 'application/json' }, cfg.timeoutMs ?? 2000, 'GET');
+    const res = await send(url, '', headers, cfg.timeoutMs ?? 2000, 'GET');
     const j = res.body;
-    if (res.status === 429) return { ok: false, reason: 'RATE_LIMITED' };
+    if (res.status === 429) {
+      const ra = Number(res.headers && res.headers['retry-after']);
+      const ms = ra > 0 ? ra * 1000 : Number(j && j.retryAfterMs) > 0 ? Number(j.retryAfterMs) : null;
+      return { ok: false, reason: 'RATE_LIMITED', status: 429, retryAfterMs: ms };
+    }
+    if (res.status === 401 || res.status === 403) return { ok: false, reason: 'UNAUTHORIZED', status: res.status };
     if (res.status < 400 && j && j.ok === true) return { ok: true, cmd: String(j.cmd ?? ''), data: j.data };
-    if (j && j.reason === 'UNKNOWN_GAME') return { ok: false, reason: 'UNKNOWN_GAME' };
-    return { ok: false, reason: `HTTP_${res.status}` };
+    if (j && j.reason === 'UNKNOWN_GAME') return { ok: false, reason: 'UNKNOWN_GAME', status: res.status };
+    return { ok: false, reason: `HTTP_${res.status}`, status: res.status };
   } catch (e: any) {
-    return { ok: false, reason: e && e.message === 'TIMEOUT' ? 'TIMEOUT' : 'NETWORK' };
+    return { ok: false, reason: e && e.message === 'TIMEOUT' ? 'TIMEOUT' : 'NETWORK', status: null };
   }
 }
 
-/** Object wrapper over the functions above: `new MatchingClient({baseUrl, roomApiUrl?, timeoutMs?, transport?})`. */
+/** Object wrapper over the functions above: `new MatchingClient({baseUrl, timeoutMs?, transport?})`. */
 export class MatchingClient {
   constructor(public readonly config: MatchConfig) {}
   matchNode(input: MatchInput, cb?: MatchCallback) { return matchNode(this.config, input, cb); }

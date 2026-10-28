@@ -123,16 +123,21 @@ releaseNode(cfg: MatchConfig, input: { userId?: string|number; game: string; gam
 
 Cả hai không throw, callback (nếu có) gọi đúng 1 lần với cùng object promise trả về. Best effort: caller thường chỉ log lỗi.
 
-### `listRooms` (v0.5.0)
+### Room list (`listRooms`, v0.6.0 BREAKING)
+
+Luồng: có game token -> `listRooms` -> người chơi chọn phòng -> JOIN -> `matchNode({roomId, nodeId, ...})`.
 
 ```ts
-const c = new MatchingClient({ baseUrl: 'https://director.example', roomApiUrl: 'https://rooms.example' });
-const r = await c.listRooms({ game: 'ludo', bucket: '2P_6', balance? }); // or listRooms(cfg, {...})
-// { ok: true, cmd, data } | { ok: false, reason }
-// reason: NOT_CONFIGURED | NETWORK | TIMEOUT | RATE_LIMITED (429) | UNKNOWN_GAME | HTTP_<status>
+const c = new MatchingClient({ baseUrl: 'https://director.example.com' }); // cùng baseUrl với matchNode
+const r = await c.listRooms({ game: 'ludo', bucket: '2P_6', balance?, gameToken }); // or listRooms(cfg, {...})
+// { ok: true, cmd, data } | { ok: false, reason, status?, retryAfterMs? }
+// reason: NO_GAME_TOKEN | UNAUTHORIZED (401/403) | RATE_LIMITED (429, retryAfterMs từ Retry-After) | UNKNOWN_GAME | NETWORK | TIMEOUT | HTTP_<status>
+if (r.ok) { /* r.data -> chọn phòng -> matchNode(cfg, { ..., roomId, nodeId }) */ }
 ```
 
-`GET ${roomApiUrl}/v1/public/rooms?game=&bucket=`, không header auth, cùng `timeoutMs`/`transport` như `matchNode` (transport nhận `method` 'GET' làm tham số thứ 5). `data` là payload y hệt reply SFS của cmd danh sách phòng. Không throw.
+`GET ${baseUrl}/v1/rooms?game=&bucket=&balance=` kèm header `X-Game-Token`; cùng `timeoutMs`/`transport` như `matchNode` (transport nhận `method` 'GET' làm tham số thứ 5, có thể trả thêm `headers` để đọc Retry-After). Thiếu `gameToken` -> `NO_GAME_TOKEN`, không gọi mạng. `data` là payload y hệt reply SFS của cmd danh sách phòng. Không throw.
+
+Deprecated: `MatchConfig.roomApiUrl` — chỉ khi KHÔNG có `baseUrl` thì giữ hành vi cũ (`GET ${roomApiUrl}/v1/public/rooms`, không auth, không cần token) thêm 1 version; có cả hai thì dùng `baseUrl`. Sẽ bỏ ở 0.7.0.
 
 `matchNode` nhận thêm `roomId?` + `nodeId?` (chỉ gửi khi có; có `roomId` thì phải có `nodeId`). Director trả `409 ROOM_UNAVAILABLE` (phòng không còn vào được) hoặc `400 ROOM_NODE_REQUIRED` -> `kind:'fallback'` với `reason` tương ứng và `status`; caller coi `ROOM_UNAVAILABLE` là "chọn lại phòng".
 

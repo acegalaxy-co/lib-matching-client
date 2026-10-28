@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-10-25
+
+- BREAKING: `listRooms` gọi director: `GET ${baseUrl}/v1/rooms?game=&bucket=&balance=` kèm `X-Game-Token`; `input.gameToken` bắt buộc (thiếu -> `{ok:false, reason:'NO_GAME_TOKEN'}`, không throw, không gọi mạng).
+- Map: 200 `{ok:true}` -> `{ok:true, cmd, data}` như cũ; 401/403 -> `UNAUTHORIZED` (+`status`); 429 -> `RATE_LIMITED` (+`retryAfterMs` từ Retry-After); 5xx/timeout/network/body hỏng -> như cũ. Kết quả lỗi có thêm `status?`, `retryAfterMs?`.
+- Deprecated: `MatchConfig.roomApiUrl`. Chỉ có `roomApiUrl` (không `baseUrl`) -> giữ hành vi public cũ (`/v1/public/rooms`, không auth) thêm 1 version; có cả hai -> dùng `baseUrl`.
+- `MatchTransport` kết quả thêm `headers?` tuỳ chọn (lower-case, đọc `retry-after`); transport mặc định (XHR/fetch) đã trả.
+
 ## 0.5.0
 
 - Mới (additive, tương thích ngược): `listRooms(cfg, {game, bucket?, balance?})` -> `{ok:true, cmd, data}` | `{ok:false, reason}` (GET `${roomApiUrl}/v1/public/rooms?game=&bucket=`, không header auth). reason: `NOT_CONFIGURED` (thiếu `roomApiUrl`), `NETWORK`, `TIMEOUT`, `RATE_LIMITED` (429), `UNKNOWN_GAME`, `HTTP_<status>`. Không throw.

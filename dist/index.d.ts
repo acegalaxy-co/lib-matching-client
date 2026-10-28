@@ -1,6 +1,6 @@
 export interface MatchConfig {
     baseUrl: string;
-    /** v0.5.0: base URL of the public room API (GET /v1/public/rooms). Absent = listRooms returns NOT_CONFIGURED. */
+    /** @deprecated v0.6.0: use baseUrl (listRooms now calls the director with X-Game-Token). Honoured for one more version only when baseUrl is absent: old public GET /v1/public/rooms, no auth. */
     roomApiUrl?: string;
     /** Request timeout in ms (default 2000). */
     timeoutMs?: number;
@@ -96,10 +96,13 @@ export type MatchTransport = (url: string, body: string, headers: Record<string,
 /** v0.5.0: HTTP method, 'POST' (default) or 'GET' (listRooms; body is ''). */
 method?: 'GET' | 'POST') => Promise<{
     status: number;
-    body: any;
+    body: any; /** v0.6.0: optional response headers (lower-case keys), used for Retry-After. */
+    headers?: Record<string, string>;
 }>;
 export interface ListRoomsInput {
     game: string;
+    /** v0.6.0 (required): player's game token, sent as X-Game-Token. Missing -> {ok:false, reason:'NO_GAME_TOKEN'}. Not needed in legacy roomApiUrl-only mode. */
+    gameToken?: string;
     bucket?: string;
     /** v0.5.0: forwarded as `balance` query param (String(), omitted when undefined/null) for games whose list depends on the player's balance. */
     balance?: string | number;
@@ -111,7 +114,9 @@ export type ListRoomsResult = {
     data: any;
 } | {
     ok: false;
-    reason: 'NOT_CONFIGURED' | 'NETWORK' | 'TIMEOUT' | 'RATE_LIMITED' | 'UNKNOWN_GAME' | string;
+    reason: 'NOT_CONFIGURED' | 'NO_GAME_TOKEN' | 'UNAUTHORIZED' | 'NETWORK' | 'TIMEOUT' | 'RATE_LIMITED' | 'UNKNOWN_GAME' | string;
+    status?: number | null;
+    retryAfterMs?: number | null;
 };
 /** Ludo buckets only (kept for compatibility). Other games have their own buckets; the lib does not list them. */
 export declare const LUDO_BUCKETS: readonly ["2P_6", "2P_56", "2P_246", "3P_6", "3P_56", "3P_246", "4P_6", "4P_56", "4P_246"];
@@ -144,13 +149,14 @@ export declare function confirmRoom(cfg: MatchConfig, input: ConfirmInput, callb
  */
 export declare function releaseNode(cfg: MatchConfig, input: ReleaseInput, callbackFun?: ActionCallback): Promise<ActionResult>;
 /**
- * v0.5.0: list rooms from the public room API: GET ${roomApiUrl}/v1/public/rooms?game=&bucket=.
- * No auth headers. Never throws. ok:true -> {cmd, data} (data = the SFS-shaped list payload);
- * otherwise {ok:false, reason}: NOT_CONFIGURED (no roomApiUrl), NETWORK, TIMEOUT, RATE_LIMITED (429),
- * UNKNOWN_GAME, or HTTP_<status>. A malformed bucket is dropped, not sent.
+ * v0.6.0: list rooms via the director: GET ${baseUrl}/v1/rooms?game=&bucket=&balance= with X-Game-Token. Never throws.
+ * ok:true -> {cmd, data}. Otherwise {ok:false, reason, status?, retryAfterMs?}: NO_GAME_TOKEN (nothing sent),
+ * UNAUTHORIZED (401/403), RATE_LIMITED (429, retryAfterMs from Retry-After), UNKNOWN_GAME, NETWORK, TIMEOUT, HTTP_<status>.
+ * A malformed bucket is dropped, not sent.
+ * Deprecated: with only cfg.roomApiUrl (no baseUrl) the old public GET /v1/public/rooms (no auth) is used; baseUrl wins if both set.
  */
 export declare function listRooms(cfg: MatchConfig, input: ListRoomsInput): Promise<ListRoomsResult>;
-/** Object wrapper over the functions above: `new MatchingClient({baseUrl, roomApiUrl?, timeoutMs?, transport?})`. */
+/** Object wrapper over the functions above: `new MatchingClient({baseUrl, timeoutMs?, transport?})`. */
 export declare class MatchingClient {
     readonly config: MatchConfig;
     constructor(config: MatchConfig);

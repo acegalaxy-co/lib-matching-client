@@ -230,34 +230,61 @@ test('callback that throws does not break confirm/release', async () => {
 // ---- v0.5.0: listRooms + roomId/nodeId ----
 import { listRooms, MatchingClient } from '../dist/index.js';
 
-test('listRooms ok: GET /v1/public/rooms?game=&bucket=, no auth headers', async () => {
+const LR = { ok: true, ts: 1, game: 'ludo', cmd: 'room.list', data: { rooms: [1] } };
+const lrCfg = (status, body, headers, extra) => ({ baseUrl: 'http://d', transport: () => Promise.resolve({ status, body, headers }), ...extra });
+
+test('listRooms ok: GET /v1/rooms?game=&bucket= with X-Game-Token, data passthrough', async () => {
   let seen;
-  const { s, url } = await server((req, b, res) => { seen = { method: req.method, path: req.url, auth: req.headers.authorization, gt: req.headers['x-game-token'] }; res.end(JSON.stringify({ ok: true, ts: 1, game: 'ludo', cmd: 'room.list', data: { rooms: [1] } })); });
+  const { s, url } = await server((req, b, res) => { seen = { method: req.method, path: req.url, gt: req.headers['x-game-token'] }; res.end(JSON.stringify(LR)); });
   try {
-    const r = await new MatchingClient({ baseUrl: 'http://unused', roomApiUrl: url + '/' }).listRooms({ game: 'ludo', bucket: '2P_6' });
+    const r = await new MatchingClient({ baseUrl: url + '/' }).listRooms({ game: 'ludo', bucket: '2P_6', gameToken: 'gt-1' });
     assert.deepEqual(r, { ok: true, cmd: 'room.list', data: { rooms: [1] } });
-    assert.deepEqual(seen, { method: 'GET', path: '/v1/public/rooms?game=ludo&bucket=2P_6', auth: undefined, gt: undefined });
-    await listRooms({ baseUrl: 'x', roomApiUrl: url }, { game: 'ludo', bucket: 'bad bucket!' });
-    assert.equal(seen.path, '/v1/public/rooms?game=ludo');
+    assert.deepEqual(seen, { method: 'GET', path: '/v1/rooms?game=ludo&bucket=2P_6', gt: 'gt-1' });
+    await listRooms({ baseUrl: url }, { game: 'ludo', bucket: 'bad bucket!', gameToken: 'gt-1' });
+    assert.equal(seen.path, '/v1/rooms?game=ludo');
   } finally { s.close(); }
 });
 
-test('listRooms: 429 -> RATE_LIMITED, 400 UNKNOWN_GAME, 500 -> HTTP_500, bad body on 200', async () => {
-  const cfg = (status, body) => ({ baseUrl: 'x', roomApiUrl: 'http://r', transport: () => Promise.resolve({ status, body }) });
-  assert.deepEqual(await listRooms(cfg(429, { ok: false }), { game: 'g' }), { ok: false, reason: 'RATE_LIMITED' });
-  assert.deepEqual(await listRooms(cfg(400, { ok: false, reason: 'UNKNOWN_GAME' }), { game: 'g' }), { ok: false, reason: 'UNKNOWN_GAME' });
-  assert.deepEqual(await listRooms(cfg(500, null), { game: 'g' }), { ok: false, reason: 'HTTP_500' });
-  assert.deepEqual(await listRooms(cfg(200, null), { game: 'g' }), { ok: false, reason: 'HTTP_200' });
+test('listRooms: missing gameToken -> NO_GAME_TOKEN, transport not called', async () => {
+  let n = 0;
+  const cfg = { baseUrl: 'http://d', transport: async () => { n++; return { status: 200, body: LR }; } };
+  assert.deepEqual(await listRooms(cfg, { game: 'g' }), { ok: false, reason: 'NO_GAME_TOKEN', status: null });
+  assert.equal((await listRooms(cfg, { game: 'g', gameToken: '' })).reason, 'NO_GAME_TOKEN');
+  assert.equal(n, 0);
+});
+
+test('listRooms: 401/403 -> UNAUTHORIZED, 429 -> RATE_LIMITED + retryAfterMs, 400 UNKNOWN_GAME, 5xx, bad body', async () => {
+  const inp = { game: 'g', gameToken: 't' };
+  assert.deepEqual(await listRooms(lrCfg(401, { ok: false }), inp), { ok: false, reason: 'UNAUTHORIZED', status: 401 });
+  assert.deepEqual(await listRooms(lrCfg(403, null), inp), { ok: false, reason: 'UNAUTHORIZED', status: 403 });
+  assert.deepEqual(await listRooms(lrCfg(429, { ok: false }, { 'retry-after': '3' }), inp), { ok: false, reason: 'RATE_LIMITED', status: 429, retryAfterMs: 3000 });
+  assert.equal((await listRooms(lrCfg(429, { ok: false }), inp)).retryAfterMs, null);
+  assert.equal((await listRooms(lrCfg(400, { ok: false, reason: 'UNKNOWN_GAME' }), inp)).reason, 'UNKNOWN_GAME');
+  assert.deepEqual(await listRooms(lrCfg(503, null), inp), { ok: false, reason: 'HTTP_503', status: 503 });
+  assert.deepEqual(await listRooms(lrCfg(200, null), inp), { ok: false, reason: 'HTTP_200', status: 200 });
 });
 
 test('listRooms: timeout, network, not configured; never throws', async () => {
   const { s, url } = await server(() => { /* never answers */ });
   try {
-    assert.deepEqual(await listRooms({ baseUrl: 'x', roomApiUrl: url, timeoutMs: 100 }, { game: 'ludo' }), { ok: false, reason: 'TIMEOUT' });
+    assert.equal((await listRooms({ baseUrl: url, timeoutMs: 100 }, { game: 'ludo', gameToken: 't' })).reason, 'TIMEOUT');
   } finally { s.closeAllConnections(); s.close(); }
-  assert.equal((await listRooms({ baseUrl: 'x', roomApiUrl: 'http://127.0.0.1:1' }, { game: 'ludo' })).reason, 'NETWORK');
-  assert.deepEqual(await listRooms({ baseUrl: 'x' }, { game: 'ludo' }), { ok: false, reason: 'NOT_CONFIGURED' });
-  assert.deepEqual(await listRooms(undefined, { game: 'ludo' }), { ok: false, reason: 'NOT_CONFIGURED' });
+  assert.equal((await listRooms({ baseUrl: 'http://127.0.0.1:1' }, { game: 'ludo', gameToken: 't' })).reason, 'NETWORK');
+  assert.equal((await listRooms({}, { game: 'ludo', gameToken: 't' })).reason, 'NOT_CONFIGURED');
+  assert.equal((await listRooms(undefined, { game: 'ludo' })).reason, 'NOT_CONFIGURED');
+});
+
+test('listRooms legacy: roomApiUrl only -> old public path, no auth header, no token needed; baseUrl wins when both', async () => {
+  const calls = [];
+  const transport = async (u, b, h) => { calls.push({ u, h }); return { status: 200, body: LR }; };
+  const r = await listRooms({ roomApiUrl: 'http://r/', transport }, { game: 'ludo' });
+  assert.equal(r.ok, true);
+  assert.equal(calls[0].u, 'http://r/v1/public/rooms?game=ludo');
+  assert.equal('X-Game-Token' in calls[0].h, false);
+  await listRooms({ baseUrl: 'http://d', roomApiUrl: 'http://r', transport }, { game: 'ludo', gameToken: 'T' });
+  assert.equal(calls[1].u, 'http://d/v1/rooms?game=ludo');
+  assert.equal(calls[1].h['X-Game-Token'], 'T');
+  assert.equal((await listRooms({ baseUrl: 'http://d', roomApiUrl: 'http://r', transport }, { game: 'ludo' })).reason, 'NO_GAME_TOKEN');
 });
 
 test('matchNode: roomId/nodeId in body only when provided', async () => {
@@ -279,13 +306,13 @@ test('matchNode: 409 ROOM_UNAVAILABLE and 400 ROOM_NODE_REQUIRED -> fallback wit
 test('listRooms: balance forwarded as query param, omitted when undefined', async () => {
   const urls = [];
   const transport = async (u) => { urls.push(u); return { status: 200, body: { ok: true, cmd: 'c', data: {} } }; };
-  const cfg = { baseUrl: 'x', roomApiUrl: 'http://r', transport };
-  await listRooms(cfg, { game: 'gaple', bucket: '1', balance: 12500 });
-  await listRooms(cfg, { game: 'gaple', balance: '0' });
-  await listRooms(cfg, { game: 'gaple' });
+  const cfg = { baseUrl: 'http://d', transport };
+  await listRooms(cfg, { game: 'gaple', bucket: '1', balance: 12500, gameToken: 't' });
+  await listRooms(cfg, { game: 'gaple', balance: '0', gameToken: 't' });
+  await listRooms(cfg, { game: 'gaple', gameToken: 't' });
   assert.deepEqual(urls, [
-    'http://r/v1/public/rooms?game=gaple&bucket=1&balance=12500',
-    'http://r/v1/public/rooms?game=gaple&balance=0',
-    'http://r/v1/public/rooms?game=gaple',
+    'http://d/v1/rooms?game=gaple&bucket=1&balance=12500',
+    'http://d/v1/rooms?game=gaple&balance=0',
+    'http://d/v1/rooms?game=gaple',
   ]);
 });
